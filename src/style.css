@@ -1,0 +1,14 @@
+/**
+ * @fileoverview 全局重置与基础样式文件。
+ * 清理并重置默认的浏览器外边距及盒模型行为，保证在不同设备上表现一致。
+ */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+*, *::before, *::after {
+  box-sizing: inherit;
+}
