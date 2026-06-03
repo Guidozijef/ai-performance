@@ -7,7 +7,11 @@
 
 import { ref } from 'vue';
 import { geminiConfig } from '../store';
-import { Settings, ShieldAlert, Eye, EyeOff, Save, Check } from 'lucide-vue-next';
+import { Settings, ShieldAlert, Eye, EyeOff, Save, Check, ChevronDown, ChevronUp } from 'lucide-vue-next';
+
+// 控制配置面板的展开与收起状态
+// 若本地已存在 API Key，则默认折叠以节省主面板空间；若未配置则展开引导用户输入
+const isCollapsed = ref(!!geminiConfig.apiKey);
 
 // 控制 API Key 显隐状态
 const showKey = ref(false);
@@ -44,12 +48,21 @@ function handleModelSelectChange() {
 
 <template>
   <div class="glass-card settings-panel">
-    <div class="card-header">
+    <!-- 点击头部可控制配置面板的折叠与展开 -->
+    <div class="card-header" @click="isCollapsed = !isCollapsed" style="cursor: pointer; user-select: none;">
       <Settings class="header-icon" />
       <h2>AI 模型与配置设定</h2>
+      <div class="collapse-trigger">
+        <span class="status-summary" v-if="isCollapsed">
+          模型: {{ geminiConfig.model }} | {{ geminiConfig.proxyUrl ? '代理已启用' : '官方直连' }}
+        </span>
+        <ChevronDown v-if="isCollapsed" :size="16" class="arrow-icon" />
+        <ChevronUp v-else :size="16" class="arrow-icon" />
+      </div>
     </div>
 
-    <div class="card-body">
+    <transition name="collapse">
+      <div class="card-body" v-show="!isCollapsed">
       <!-- 隐私警示框 -->
       <div class="alert-box warning">
         <ShieldAlert class="alert-icon" />
@@ -98,6 +111,10 @@ function handleModelSelectChange() {
             @change="handleSave"
           />
           <span class="help-text">国内用户如果无法直连，可填写自定义反向代理网关。若为空则默认直连官方服务。</span>
+          <!-- 安全防范警示：警告用户关于第三方中转代理的数据安全风险 -->
+          <span class="help-text warning-text" v-if="geminiConfig.proxyUrl">
+            ⚠️ 警告：使用非官方代理会经过其服务器，请确保代理可信，以防泄露您的 API 密钥及敏感绩效数据。
+          </span>
         </div>
         <div class="form-group flex-1">
           <label for="modelSelect">AI 模型版本</label>
@@ -148,6 +165,7 @@ function handleModelSelectChange() {
         </button>
       </div>
     </div>
+    </transition>
   </div>
 </template>
 
@@ -334,29 +352,91 @@ label {
   font-size: 0.9rem;
   font-weight: 600;
   padding: 10px 20px;
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
-  border: 1px solid transparent;
-  transition: all 0.2s;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-h);
+  backdrop-filter: blur(4px);
 }
 
 .btn-primary {
-  background: var(--accent);
+  background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
   color: white;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.25);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 
-.btn-primary:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px var(--accent-bg);
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(168, 85, 247, 0.4);
+  background: linear-gradient(135deg, #b86bfb 0%, #7578f3 100%);
 }
 
-.btn-primary:active {
+.btn-primary:active:not(:disabled) {
   transform: translateY(0);
+  box-shadow: 0 2px 10px rgba(168, 85, 247, 0.2);
 }
 
 .btn-save {
-  min-width: 140px;
+  min-width: 150px;
+}
+
+/* 折叠展开触发器及动画效果 */
+.collapse-trigger {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.status-summary {
+  font-size: 0.775rem;
+  color: var(--text);
+  font-weight: 400;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+}
+
+.arrow-icon {
+  color: var(--text);
+  transition: transform 0.3s;
+}
+
+/* 代理风险警告提示文字样式 */
+.warning-text {
+  color: #f59e0b !important;
+  margin-top: 4px;
+  display: block;
+}
+
+/* 展开收起过渡动画 */
+.collapse-enter-active,
+.collapse-leave-active {
+  transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease-out;
+  overflow: hidden;
+  max-height: 500px;
+}
+
+.collapse-enter-from,
+.collapse-leave-to {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+/* 下拉框选项美化，确保在各类暗色背景浏览器中清晰易读 */
+.select-control option {
+  background-color: #1e293b;
+  color: #f8fafc;
+  padding: 10px;
 }
 
 @keyframes fadeIn {

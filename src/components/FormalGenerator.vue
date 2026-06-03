@@ -444,11 +444,11 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
             
             <button 
               type="button" 
-              class="btn btn-outline success-outline-btn" 
+              class="btn btn-primary" 
               @click="downloadSingle(activeEmployee)"
             >
               <Download :size="15" />
-              <span>导出已填报 Excel (已除红)</span>
+              <span>导出已填报 Excel</span>
             </button>
           </div>
         </div>
@@ -469,7 +469,7 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
                   <th class="col-time">时间目标</th>
                   <th class="col-count">数量</th>
                   <th class="col-quality">质量目标 (分条量化，禁用主观词)</th>
-                  <th class="col-time-std">时间标准 (考核/扣分扣减细则)</th>
+                  <th class="col-time-std">时间标准</th>
                   <th class="col-count-std">数量标准</th>
                   <th class="col-quality-std">质量标准 (分条量化，禁用主观词)</th>
                   <th class="col-action">操作</th>
@@ -1046,19 +1046,19 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   background: rgba(255,255,255,0.01);
 }
 
-/* 列宽微调 */
+/* 列宽微调 - 加宽以满足大屏编辑与预览需求 */
 .col-seq { width: 45px; text-align: center; }
-.col-type { width: 75px; }
-.col-level { width: 125px; }
-.col-weight { width: 65px; }
-.col-cat { width: 95px; }
-.col-desc { min-width: 180px; }
-.col-time { width: 105px; }
-.col-count { width: 55px; }
-.col-quality { min-width: 200px; }
-.col-time-std { min-width: 150px; }
-.col-count-std { width: 75px; }
-.col-quality-std { min-width: 200px; }
+.col-type { width: 85px; }
+.col-level { width: 140px; }
+.col-weight { width: 100px; }
+.col-cat { width: 110px; }
+.col-desc { min-width: 220px; } /* 原 180px */
+.col-time { width: 150px; }      /* 原 105px */
+.col-count { width: 65px; }
+.col-quality { min-width: 300px; } /* 原 200px */
+.col-time-std { min-width: 130px; } /* 原 150px */
+.col-count-std { width: 85px; }
+.col-quality-std { min-width: 300px; } /* 原 200px */
 .col-action { width: 45px; text-align: center; }
 
 .cell-seq-num {
@@ -1124,17 +1124,24 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   box-shadow: 0 0 0 2px var(--accent-bg);
 }
 
+/* 下拉菜单项的暗色背景与高对比度文字 */
+.grid-select option {
+  background-color: #1e293b;
+  color: #f8fafc;
+  padding: 8px;
+}
+
 .grid-textarea {
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-h);
-  padding: 6px;
+  padding: 8px;
   width: 100%;
-  height: 80px;
+  height: 100px; /* 从 80px 调整为更舒适的 100px */
   resize: vertical;
   box-sizing: border-box;
-  font-size: 0.775rem;
-  line-height: 1.4;
+  font-size: 0.825rem;
+  line-height: 1.45;
   font-family: inherit;
   outline: none;
   border-radius: 4px;
@@ -1169,9 +1176,10 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   font-weight: 700;
 }
 
+/* 单元格删除按钮的精致化设计 */
 .grid-action-delete {
-  background: transparent;
-  border: none;
+  background: rgba(239, 68, 68, 0.05);
+  border: 1px solid rgba(239, 68, 68, 0.15);
   color: var(--text);
   cursor: pointer;
   padding: 6px;
@@ -1180,16 +1188,106 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   align-items: center;
   justify-content: center;
   margin-top: 4px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .grid-action-delete:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.1);
+  background: rgba(239, 68, 68, 0.18);
+  border-color: #ef4444;
   color: #ef4444;
+  transform: scale(1.08);
+}
+
+.grid-action-delete:active:not(:disabled) {
+  transform: scale(0.92);
 }
 
 .grid-action-delete:disabled {
   opacity: 0.25;
   cursor: not-allowed;
+  background: transparent;
+  border-color: transparent;
+}
+
+/* 统一基础按钮样式 (符合现有高档玻璃拟态与渐变风格) */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-h);
+  backdrop-filter: blur(4px);
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.25);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(168, 85, 247, 0.4);
+  background: linear-gradient(135deg, #b86bfb 0%, #7578f3 100%);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px rgba(168, 85, 247, 0.2);
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.btn-outline {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.btn-outline:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: var(--text-h);
+  box-shadow: 0 4px 12px rgba(168, 85, 247, 0.1);
+  transform: translateY(-1px);
+}
+
+.btn-outline:active:not(:disabled) {
+  transform: translateY(0);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.btn-outline:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.text-danger {
+  color: #ef4444 !important;
+}
+
+.btn-outline.text-danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.5) !important;
+  background: rgba(239, 68, 68, 0.08) !important;
+  color: #ef4444 !important;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.1) !important;
 }
 
 .grid-actions-row {

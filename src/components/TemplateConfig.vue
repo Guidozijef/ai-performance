@@ -451,21 +451,27 @@ function removeMapping(index: number) {
 }
 
 .form-control {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border);
   color: var(--text-h);
   padding: 8px 12px;
-  border-radius: 5px;
+  border-radius: 6px;
   font-size: 0.9rem;
   outline: none;
   width: 100%;
   box-sizing: border-box;
-  transition: all 0.2s;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.form-control:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .form-control:focus {
   border-color: var(--accent);
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 0 0 3px var(--accent-bg);
 }
 
 .instruction-input {
@@ -501,13 +507,13 @@ function removeMapping(index: number) {
   padding: 5px 8px;
   cursor: pointer;
   border-radius: 4px;
-  transition: all 0.2s;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .toggle-btn.active {
-  background: var(--bg);
-  color: var(--text-h);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
+  color: white;
+  box-shadow: 0 2px 8px rgba(168, 85, 247, 0.25);
 }
 
 .toggle-btn.active span {
@@ -516,29 +522,38 @@ function removeMapping(index: number) {
 
 .toggle-btn:hover:not(.active) {
   color: var(--text-h);
+  background: rgba(255, 255, 255, 0.03);
 }
 
-/* 删除按钮 */
+/* 删除按钮样式与交互 */
 .btn-delete {
-  background: transparent;
-  border: none;
+  background: rgba(239, 68, 68, 0.05);
+  border: 1px solid rgba(239, 68, 68, 0.15);
   color: #ef4444;
   cursor: pointer;
   padding: 8px;
-  border-radius: 4px;
+  border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background-color 0.2s;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-delete:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.1);
+  background: rgba(239, 68, 68, 0.15);
+  border-color: #ef4444;
+  transform: scale(1.05);
+}
+
+.btn-delete:active:not(:disabled) {
+  transform: scale(0.95);
 }
 
 .btn-delete:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+  background: transparent;
+  border-color: transparent;
 }
 
 /* 添加按钮行 */
@@ -549,24 +564,31 @@ function removeMapping(index: number) {
   justify-content: flex-start;
 }
 
+/* 虚线边框大按钮 */
 .btn-outline {
-  background: transparent;
+  background: rgba(255, 255, 255, 0.02);
   border: 1px dashed var(--border);
   color: var(--text-h);
-  padding: 8px 16px;
-  font-size: 0.85rem;
-  border-radius: 6px;
+  padding: 10px 18px;
+  font-size: 0.875rem;
+  border-radius: 8px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  transition: all 0.2s;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-outline:hover {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--text-h);
   background: var(--accent-bg);
+  box-shadow: 0 4px 12px rgba(168, 85, 247, 0.1);
+  transform: translateY(-1px);
+}
+
+.btn-outline:active {
+  transform: translateY(0);
 }
 
 @keyframes fadeIn {

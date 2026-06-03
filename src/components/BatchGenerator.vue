@@ -559,7 +559,12 @@ function downloadAll() {
   font-size: 0.875rem;
   border-radius: 4px;
   outline: none;
-  transition: all 0.2s;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.cell-input:hover {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255,255,255,0.02);
 }
 
 .cell-input:focus {
@@ -574,7 +579,7 @@ function downloadAll() {
 
 .cell-textarea {
   background: transparent;
-  border: none;
+  border: 1px solid transparent; /* 统一边框风格 */
   color: var(--text-h);
   padding: 6px 8px;
   width: 100%;
@@ -585,6 +590,18 @@ function downloadAll() {
   font-family: inherit;
   outline: none;
   border-radius: 4px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.cell-textarea:hover {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255,255,255,0.02);
+}
+
+.cell-textarea:focus {
+  border-color: var(--accent);
+  background: rgba(255,255,255,0.06);
+  box-shadow: 0 0 0 2px var(--accent-bg);
 }
 
 /* 状态徽章 */
@@ -752,7 +769,7 @@ function downloadAll() {
   gap: 10px;
 }
 
-/* 按钮基础及自定义 */
+/* 按钮基础及自定义 (符合现有高档玻璃拟态与渐变风格) */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -760,63 +777,98 @@ function downloadAll() {
   gap: 8px;
   font-size: 0.875rem;
   font-weight: 600;
-  padding: 8px 16px;
-  border-radius: 6px;
+  padding: 8px 18px;
+  border-radius: 8px;
   cursor: pointer;
-  border: 1px solid transparent;
-  transition: all 0.2s;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-h);
+  backdrop-filter: blur(4px);
 }
 
 .btn-primary {
-  background: var(--accent);
+  background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
   color: white;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.25);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 
 .btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px var(--accent-bg);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(168, 85, 247, 0.4);
+  background: linear-gradient(135deg, #b86bfb 0%, #7578f3 100%);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px rgba(168, 85, 247, 0.2);
 }
 
 .btn-primary:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
 }
 
 .btn-outline {
-  background: transparent;
+  background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--border);
-  color: var(--text-h);
+  color: var(--text);
 }
 
 .btn-outline:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: var(--text-h);
+  box-shadow: 0 4px 12px rgba(168, 85, 247, 0.1);
+  transform: translateY(-1px);
+}
+
+.btn-outline:active:not(:disabled) {
+  transform: translateY(0);
   background: rgba(255, 255, 255, 0.05);
-  border-color: var(--text-h);
 }
 
 .btn-outline:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
 }
 
 .success-outline-btn {
   color: #10b981;
   border-color: rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.02);
 }
 
-.success-outline-btn:hover {
-  background: rgba(16, 185, 129, 0.05) !important;
+.success-outline-btn:hover:not(:disabled) {
+  background: rgba(16, 185, 129, 0.08) !important;
   border-color: #10b981 !important;
+  color: #10b981 !important;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.15) !important;
+  transform: translateY(-1px);
 }
 
 .btn-danger {
-  background: #ef4444;
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
   color: white;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
 }
 
-.btn-danger:hover {
-  opacity: 0.9;
+.btn-danger:hover:not(:disabled) {
+  transform: translateY(-2px);
+  background: linear-gradient(135deg, #f87171 0%, #e11d48 100%);
+  box-shadow: 0 6px 18px rgba(239, 68, 68, 0.35);
+}
+
+.btn-danger:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 /* 导入 Modal 弹窗 */
