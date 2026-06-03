@@ -57,6 +57,45 @@ const validationError = computed(() => {
   return '';
 });
 
+// 计算当前正在编辑员工的任务指标规则校验
+// 包含四项核心校验规则：
+// 1. 各项指标权重不超过 30%
+// 2. 指标总权重刚好等于 100%
+// 3. 重要战略/关键任务对应的类型必须为 KPI，常规/辅助任务对应的类型必须为 CPI
+// 4. 重要任务比例最低不能低于 20%
+const activeEmpValidationError = computed(() => {
+  const emp = activeEmployee.value;
+  if (!emp || emp.status !== 'success' || !emp.tasks || emp.tasks.length === 0) {
+    return '';
+  }
+
+  // 1. 校验权重总和是否为 1.0 (100%)
+  const totalW = getTasksTotalWeight(emp.tasks);
+  if (Math.abs(totalW - 1.0) > 0.001) {
+    return `总权重为 ${(totalW * 100).toFixed(0)}%，必须刚好等于 100%。`;
+  }
+
+  // 2. 校验指标最大限制与最低比例约束
+  for (let i = 0; i < emp.tasks.length; i++) {
+    const t = emp.tasks[i];
+    const w = parseFloat(t.weight as any || 0);
+
+    if (w > 0.30001) {
+      return `第 ${i + 1} 项“${t.category || '指标'}”权重为 ${(w * 100).toFixed(0)}%，已超过最大限制 30%。`;
+    }
+
+    if (t.level === '重要关键任务' && w < 0.1999) {
+      return `重要关键任务（如第 ${i + 1} 项）的权重为 ${(w * 100).toFixed(0)}%，低于最低占比要求 20%。`;
+    }
+
+    if ((t.level === '常规执行任务' || t.level === '辅助零散任务') && t.type !== 'CPI') {
+      return `常规/辅助任务（如第 ${i + 1} 项）类型当前为 ${t.type}，必须设为 CPI。`;
+    }
+  }
+
+  return '';
+});
+
 /**
  * 组件加载时自动拉取 Public 下的默认 Excel 模板文件
  */
@@ -427,9 +466,16 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
       <!-- 下部分：大屏预览与编辑区域 (100% 宽度，仿 Excel 网格样式) -->
       <div class="spreadsheet-panel-card" v-if="activeEmployee">
         <div class="section-title-row">
-          <span class="section-title">
-            本月绩效计划书网格预览：<strong class="text-accent">{{ activeEmployee.name || '未命名' }}</strong>
-          </span>
+          <div class="title-group" style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
+            <span class="section-title">
+              本月绩效计划书网格预览：<strong class="text-accent">{{ activeEmployee.name || '未命名' }}</strong>
+            </span>
+            <!-- 规则验证指示器 -->
+            <div class="active-validation-warning" v-if="activeEmpValidationError">
+              <AlertTriangle :size="14" style="color: #ef4444;" />
+              <span>规则警示: {{ activeEmpValidationError }}</span>
+            </div>
+          </div>
           <div class="right-actions" v-if="activeEmployee.status === 'success' && activeEmployee.tasks.length > 0">
             <!-- 权重检测 -->
             <span 
@@ -1355,5 +1401,60 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 @keyframes pulse {
   0%, 100% { transform: scale(1); opacity: 1; }
   50% { transform: scale(1.1); opacity: 0.5; }
+}
+
+/* 核心网格预览区辅助样式 */
+.section-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+  margin-bottom: 8px;
+}
+
+.section-title {
+  font-size: 1.1rem;
+  color: var(--text-h);
+  font-weight: 600;
+}
+
+.weight-badge {
+  font-size: 0.775rem;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: #ef4444;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+}
+
+.weight-badge.ok {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.25);
+  color: #10b981;
+}
+
+.right-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.active-validation-warning {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: #f87171;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 </style>

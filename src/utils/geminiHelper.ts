@@ -229,11 +229,15 @@ ${lastMonthPerformance || '无上月绩效数据'}
 ${thisMonthWorkContent || '无本月工作安排'}
 
 【绩效计划制定规则】：
-1. 必须生成【至少 4 个】工作任务行，以完整科学地考核该员工的工作。
-2. 任务行的指标分配要求（总权重必须刚好等于 100%，即小数 1.0）：
-   - 包含“核心战略任务”（指标等级）、“重要关键任务”、“常规执行任务”或“辅助零散任务”。
-   - 每个任务分配一个权重，权重必须是 5% 的倍数（在 JSON 中以小数如 0.3, 0.25, 0.15 等数值形式表示）。
-   - 所有任务的权重之和必须严格等于 1.0 (即 100%)。
+1. 必须生成【至少 4 个】工作任务项目（通常为 4-5 个），以完整科学地考核该员工的工作。即使本月输入的工作安排内容较少，你也要根据其岗位和项目对其进行合理拆解、细化出至少 4 项，绝对不能少于 4 项！
+2. 任务行的指标分配与权重分配约束（总权重必须刚好等于 100%，即小数 1.0）：
+   - 【等级与类型严格绑定】：指标等级包含“核心战略任务”、“重要关键任务”、“常规执行任务”或“辅助零散任务”。
+     * 如果指标等级为常规任务（即等级为“常规执行任务”或“辅助零散任务”），那么其对应的指标类型（type）必须是“CPI”。
+     * 如果指标等级为核心或重要任务（即等级为“核心战略任务”或“重要关键任务”），其对应的指标类型（type）必须是“KPI”。
+   - 【指标权重约束】：每个任务分配的权重必须是 5% 的倍数（如以 0.3, 0.25, 0.2, 0.15, 0.1, 0.05 等小数形式表示）。
+   - 【重要限制：每一项指标权重最大绝对不能超过 30%（即 weight <= 0.30）】。
+   - 【重要限制：“重要关键任务”的分配比例（权重）最低不能低于 20%（即 weight >= 0.20，且最大不超过 0.30）】。
+   - 所有任务的权重之和必须由你平摊并计算，确保生成的 JSON 中 tasks 列表中所有 weight 字段相加之和【精准等于 1.0】。如果不够 100%，你必须增加更多符合限制的项目以达到 100%。
 3. 【核心极重要规则：质量目标与质量标准必须绝对客观可量化，严禁任何主观描述，且必须分条列出序号】：
    - 质量目标（quality_target）和质量标准（quality_standard）的内容必须采用分条列出序号格式（如：'1. [具体项1]\n2. [具体项2]\n3. [具体项3]'），不得写成一整段话，每条都必须有精确的量化边界或对应的违规扣分触发条件。
    - 【严禁使用主观描述及模糊形容词】。禁止出现任何诸如：“积极主动”、“认真细致”、“配合度高”、“高效率”、“及时完成”、“保证系统稳定”、“正常运行”、“无重大故障”、“工作量饱满”、“沟通良好”等字眼。
@@ -307,7 +311,7 @@ JSON 结构样例：
     ],
     generationConfig: {
       responseMimeType: 'application/json',
-      temperature: 0.7,
+      temperature: 0.4,
     },
     ...(systemInstruction?.trim()
       ? {
@@ -344,36 +348,117 @@ JSON 结构样例：
 
     let tasks: PerformanceTask[] = parsedData.tasks || [];
     
-    // 如果任务数不足 4 行，补齐到 4 行
+    // 1. 规范化指标等级与指标类型（常规/辅助任务对应 CPI，重要/核心对应 KPI）
+    tasks.forEach(t => {
+      if (!['核心战略任务', '重要关键任务', '常规执行任务', '辅助零散任务'].includes(t.level)) {
+        t.level = '常规执行任务';
+      }
+      if (t.level === '常规执行任务' || t.level === '辅助零散任务') {
+        t.type = 'CPI';
+      } else {
+        t.type = 'KPI';
+      }
+    });
+
+    // 2. 格式化权重值，并将其舍入为最近的 5% (0.05) 倍数
+    tasks.forEach(t => {
+      let w = parseFloat(t.weight as any);
+      if (isNaN(w)) w = 0.20;
+      if (w > 1) w = w / 100;
+      w = Math.round(w * 20) / 20; // 舍入到 0.05
+      t.weight = w;
+    });
+
+    // 3. 约束每一项权重的边界：最大不超过 30% (0.30)；重要关键任务最低不能低于 20% (0.20)
+    tasks.forEach(t => {
+      if (t.level === '重要关键任务') {
+        if (t.weight < 0.20) t.weight = 0.20;
+      }
+      if (t.weight > 0.30) {
+        t.weight = 0.30;
+      }
+    });
+
+    // 4. 如果不够 4 个指标项目，进行补齐，因为单项最大 30%，要凑够 100% 至少需要 4 项
     while (tasks.length < 4) {
       tasks.push({
-        type: 'KPI',
+        type: 'CPI',
         level: '常规执行任务',
-        weight: 0.0,
+        weight: 0.10,
         category: '日常事务',
-        description: '常规工作支持',
+        description: '常规日常工作支持',
         time_target: '当月月底前',
         count_target: '/',
-        quality_target: '完成日常安排的工作，质量符合岗位基本标准',
-        time_standard: '/',
+        quality_target: '1.按时保质完成上级交办的常规事务\\n2.部门内协作响应时间不超过1小时',
+        time_standard: '每延迟一天扣2分',
         count_standard: '/',
-        quality_standard: '工作出错受到部门内通报扣 2 分/次'
+        quality_standard: '1.未按要求交付且无提前说明扣5分/次\\n2.受到跨部门协作投诉核实扣2分/次'
       });
     }
 
-    // 格式化与微调权重和，确保恰好为 1.0 (100%)
-    let totalWeight = 0;
-    tasks.forEach(t => {
-      let w = parseFloat(t.weight as any);
-      if (isNaN(w)) w = 0.25;
-      if (w > 1) w = w / 100;
-      t.weight = w;
-      totalWeight += w;
-    });
+    // 5. 循环微调以 5% (0.05) 为增量，确保权重之和严格等于 1.0 (100%)，且均满足边界条件
+    let iterations = 0;
+    while (iterations < 100) {
+      let sum = tasks.reduce((acc, t) => acc + t.weight, 0);
+      sum = Math.round(sum * 100) / 100; // 避免浮点精度问题
 
-    if (Math.abs(totalWeight - 1.0) > 0.001) {
-      const diff = 1.0 - totalWeight;
-      tasks[0].weight = parseFloat((tasks[0].weight + diff).toFixed(2));
+      if (Math.abs(sum - 1.0) < 0.001) {
+        break;
+      }
+
+      if (sum < 1.0) {
+        // 总权重不足，且单项最大 30%：增加能够增加的项
+        let increased = false;
+        for (let t of tasks) {
+          if (t.weight + 0.05 <= 0.3001) {
+            t.weight = Math.round((t.weight + 0.05) * 100) / 100;
+            increased = true;
+            break;
+          }
+        }
+        // 如果所有已有项都达到了 30% 且依旧总权重不够（例如 3 项 30% 共 90%），则必须新增一项
+        if (!increased) {
+          tasks.push({
+            type: 'CPI',
+            level: '常规执行任务',
+            weight: 0.10,
+            category: '日常事务',
+            description: '追加常规业务支持',
+            time_target: '当月月底前',
+            count_target: '/',
+            quality_target: '1.保质保量完成部门安排的常规任务',
+            time_standard: '/',
+            count_standard: '/',
+            quality_standard: '1.未达标工作受到组内提醒扣1分/次'
+          });
+        }
+      } else {
+        // 总权重超出：减少能够减少的项
+        let decreased = false;
+        for (let t of tasks) {
+          const minLimit = t.level === '重要关键任务' ? 0.20 : 0.05;
+          if (t.weight - 0.05 >= minLimit - 0.001) {
+            t.weight = Math.round((t.weight - 0.05) * 100) / 100;
+            decreased = true;
+            break;
+          }
+        }
+        // 如果在约束下无法继续减少，则打破约束微调非重要任务
+        if (!decreased) {
+          for (let t of tasks) {
+            if (t.level !== '重要关键任务' && t.weight > 0.05) {
+              t.weight = Math.round((t.weight - 0.05) * 100) / 100;
+              decreased = true;
+              break;
+            }
+          }
+        }
+        // 最终兜底
+        if (!decreased) {
+          tasks[0].weight = Math.round((tasks[0].weight - 0.05) * 100) / 100;
+        }
+      }
+      iterations++;
     }
 
     return {
