@@ -32,7 +32,43 @@ export interface EmployeeRow {
 const STORAGE_KEYS = {
   GEMINI_CONFIG: 'ai_performance_gemini_config',
   CELL_MAPPINGS: 'ai_performance_cell_mappings',
+  PERFORMANCE_MONTH: 'ai_performance_month',
+  AVAILABLE_MODELS: 'ai_performance_available_models',
 };
+
+/**
+ * 获取本地系统的当前月份，格式为 YYYY-MM。
+ * 采用本地时间 API 以防范 UTC 时区导致的前后天月份偏差问题。
+ * @returns {string} 本地当前年月字符串
+ */
+const initMonth = (): string => {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+};
+
+// 全局响应式考核月份变量，自 localStorage 初始化，若无则默认为当前月
+const savedMonth = localStorage.getItem(STORAGE_KEYS.PERFORMANCE_MONTH);
+export const performanceMonth = ref(savedMonth || initMonth());
+
+// 监听月份变化并将其同步保存至本地缓存中
+watch(performanceMonth, (newVal) => {
+  localStorage.setItem(STORAGE_KEYS.PERFORMANCE_MONTH, newVal);
+});
+
+// 可用的 API 模型列表，从本地 localStorage 初始化
+const savedModels = localStorage.getItem(STORAGE_KEYS.AVAILABLE_MODELS);
+export const availableModels = ref<string[]>(savedModels ? JSON.parse(savedModels) : []);
+
+// 监听模型列表变化并保存至本地缓存
+watch(
+  availableModels,
+  (newModels) => {
+    localStorage.setItem(STORAGE_KEYS.AVAILABLE_MODELS, JSON.stringify(newModels));
+  },
+  { deep: true }
+);
 
 // 1. API 配置状态（从 localStorage 初始化或使用默认值）
 const savedConfig = localStorage.getItem(STORAGE_KEYS.GEMINI_CONFIG);

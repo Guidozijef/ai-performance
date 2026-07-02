@@ -94,40 +94,81 @@ ${fieldsDemandStr}
 5. 仅返回 JSON 字符串本身，严禁在 JSON 前后包裹任何 Markdown 标记（例如 \`\`\`json ... \`\`\`），以确保代码能够直接进行 JSON.parse 解析。
 `;
 
-  // 2. 确定请求的基准 URL
-  const baseHost = proxyUrl?.trim() ? proxyUrl.replace(/\/$/, '') : 'https://generativelanguage.googleapis.com';
-  const requestUrl = `${baseHost}/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  // 2. 双轨协议选择：官方直连使用 Gemini 原生 API（避免 CORS 跨域拦截），代理使用 OpenAI 协议
+  const isDirectGemini = !proxyUrl || proxyUrl.trim().includes('generativelanguage.googleapis.com');
 
-  // 3. 构造请求 Payload
-  const payload = {
-    contents: [
-      {
-        parts: [
-          {
-            text: prompt,
-          },
-        ],
-      },
-    ],
-    generationConfig: {
-      responseMimeType: 'application/json', // 强制模型返回 JSON 格式
-      temperature: 0.7,
-    },
-    ...(systemInstruction?.trim()
-      ? {
-          systemInstruction: {
-            parts: [{ text: systemInstruction }],
-          },
-        }
-      : {}),
+  let requestUrl = '';
+  let payload: any = {};
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
   };
+
+  if (isDirectGemini) {
+    // 直连官方：使用原生 REST 接口（已由谷歌开启 CORS 许可）
+    requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    payload = {
+      contents: [
+        {
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.7,
+      },
+      ...(systemInstruction?.trim()
+        ? {
+            systemInstruction: {
+              parts: [{ text: systemInstruction }],
+            },
+          }
+        : {}),
+    };
+  } else {
+    // 代理网关：采用标准 OpenAI chat/completions 与 Bearer Auth
+    let baseUrl = proxyUrl.trim().replace(/\/$/, '');
+    if (baseUrl.endsWith('/v1') || baseUrl.includes('/v1/') || baseUrl.includes('/v1beta')) {
+      requestUrl = `${baseUrl}/chat/completions`;
+    } else {
+      requestUrl = `${baseUrl}/v1/chat/completions`;
+    }
+    headers['Authorization'] = `Bearer ${apiKey}`;
+
+    // 在本地开发环境下，通过 Vite 动态代理规避代理服务可能包含的 CORS 限制
+    if (import.meta.env.DEV) {
+      try {
+        const urlObj = new URL(requestUrl);
+        const origin = urlObj.origin;
+        const pathname = urlObj.pathname.replace(/\/$/, '');
+        requestUrl = `/cors-proxy${pathname}`.replace(/\/+/g, '/');
+        headers['X-Target-Url'] = origin;
+      } catch (e) {
+        // 降级处理：若 URL 解析失败，保留原路径直接发起请求
+        console.warn('CORS Proxy URL 解析失败，降级直连:', e);
+        const originalUrl = requestUrl;
+        requestUrl = '/cors-proxy';
+        headers['X-Target-Url'] = originalUrl;
+      }
+    }
+
+    payload = {
+      model,
+      messages: [
+        ...(systemInstruction?.trim() ? [{ role: 'system', content: systemInstruction }] : []),
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.7
+    };
+  }
 
   try {
     const response = await fetch(requestUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(payload),
     });
 
@@ -137,7 +178,13 @@ ${fieldsDemandStr}
     }
 
     const resData = await response.json();
-    const generatedText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+    let generatedText = '';
+
+    if (isDirectGemini) {
+      generatedText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+    } else {
+      generatedText = resData.choices?.[0]?.message?.content;
+    }
 
     if (!generatedText) {
       throw new Error('模型未返回有效的内容。');
@@ -164,10 +211,10 @@ ${fieldsDemandStr}
       success: true,
     };
   } catch (error: any) {
-    console.error('Gemini API 调用异常:', error);
+    console.error('API 调用异常:', error);
     return {
       cellData: {},
-      message: error.message || '调用 Gemini API 时发生未知错误。',
+      message: error.message || '调用 API 时发生未知错误。',
       success: false,
     };
   }
@@ -192,6 +239,7 @@ export interface FormalPerformanceResult {
  * @param position 员工岗位
  * @param lastMonthPerformance 上个月绩效内容 (文本)
  * @param thisMonthWorkContent 本月工作安排及内容 (文本)
+ * @param targetMonth 考核月份，格式为 YYYY-MM
  * @returns Promise<FormalPerformanceResult> 返回生成的员工姓名、岗位及绩效任务数组
  */
 export async function generateFormalPerformance(
@@ -199,7 +247,8 @@ export async function generateFormalPerformance(
   name: string,
   position: string,
   lastMonthPerformance: string,
-  thisMonthWorkContent: string
+  thisMonthWorkContent: string,
+  targetMonth: string // 考核月份，格式为 YYYY-MM
 ): Promise<FormalPerformanceResult> {
   const { apiKey, proxyUrl, model = 'gemini-1.5-flash', systemInstruction } = config;
 
@@ -213,10 +262,27 @@ export async function generateFormalPerformance(
     };
   }
 
-  // 构建大模型提示词，要求严密、科学、可量化，坚决杜绝任何主观或模糊的文字描述
+  // 1. 安全解析传入的考核月份，防范非法输入的注入攻击，并动态推导当月最后一天
+  let year = 2026;
+  let month = 6;
+  let lastDay = 30;
+  if (targetMonth && typeof targetMonth === 'string') {
+    const parts = targetMonth.split('-');
+    if (parts.length === 2) {
+      const parsedYear = parseInt(parts[0], 10);
+      const parsedMonth = parseInt(parts[1], 10);
+      if (!isNaN(parsedYear) && !isNaN(parsedMonth)) {
+        year = parsedYear;
+        month = parsedMonth;
+        lastDay = new Date(year, month, 0).getDate();
+      }
+    }
+  }
+
+  // 2. 构建大模型提示词，要求严密、科学、可量化，坚决杜绝任何主观或模糊的文字描述
   const prompt = `
 你是一个资深的企业人力资源（HR）绩效考评专家。
-请根据员工的基本信息、上个月填写的绩效内容、以及这个月的一些工作内容/工作安排，为该员工自动生成“这个月的工作绩效计划表（即 Excel 模板中红色的任务部分）”。
+请根据员工的基本信息、上个月填写的绩效内容、以及这个月的一些工作内容/工作安排，为该员工自动生成“${year}年${month}月的工作绩效计划表（即 Excel 模板中红色的任务部分）”。
 
 【员工基本信息】：
 - 被考核人姓名: ${name}
@@ -244,7 +310,7 @@ ${thisMonthWorkContent || '无本月工作安排'}
    - 【量化替换方案参考】：
      * “保证系统稳定/正常运行” ➡️ 替换为：“1.系统月度可用性（SLA）达到99.9%\n2.发生严重级别（一级/二级）线上事故次数为0次\n3.监控系统报警响应延迟在5分钟内”
      * “配合好、沟通积极” ➡️ 替换为：“1.跨部门接口及业务联调进度偏差在1天以内\n2.联调阶段未因单方开发质量原因导致项目整体阻塞达2小时以上”
-     * “及时完成、无延期” ➡️ 替换为：“1.在2026年6月30日前按原型要求完成代码交付并通过测试验收\n2.交付延期偏差为0天”
+     * “及时完成、无延期” ➡️ 替换为：“1.在${year}年${month}月${lastDay}日前按原型要求完成代码交付并通过测试验收\n2.交付延期偏差为0天”
    - 质量标准（quality_standard）必须是针对质量目标所做出的【扣分细则/不得分细则】：
      * 每一个质量目标序号，都必须能在质量标准中找到对应的扣分规则。
      * 比如目标是：“1.提测用例通过率达100%”，对应的标准应该是：“1.提测用例通过率每低于100%一个百分点扣2分”。
@@ -263,7 +329,7 @@ ${thisMonthWorkContent || '无本月工作安排'}
    - weight: 权重数值（小数形式，如 0.3 代表 30%）。
    - category: 所属板块，例如 "系统开发"、"系统维护"、"系统优化" 等。
    - description: 解释说明，即任务的具体背景或重要工作内容（如：无人机V2.1.8版本迭代开发）。
-   - time_target: 时间目标，如 "2026年6月29日"。
+   - time_target: 时间目标，如 "${year}年${month}月${lastDay - 1}日"。
    - count_target: 数量目标，如果没有则填写 "/"。
    - quality_target: 质量目标（务必使用分条序号格式，客观可量化，禁止主观判断）。
    - time_standard: 时间标准，如果没有则填写 "/"，或者写如 "每延迟一天扣 3 分，逾期 3 天及以上该项不得分"。
@@ -285,7 +351,7 @@ JSON 结构样例：
       "weight": 0.3,
       "category": "系统开发",
       "description": "手持甲烷探测器功能开发...",
-      "time_target": "2026年6月29日",
+      "time_target": "${year}年${month}月${lastDay - 1}日",
       "count_target": "/",
       "quality_target": "1.按产品原型要求完成APP侧XX功能开发与接口对接，提测用例通过率达100%\\n2.配合后端进行功能联调且无堵塞\\n3.内外部客户满意度达100%",
       "time_standard": "每延迟一天扣3分，累计3天及以上不得分",
@@ -296,38 +362,81 @@ JSON 结构样例：
 }
 `;
 
-  const baseHost = proxyUrl?.trim() ? proxyUrl.replace(/\/$/, '') : 'https://generativelanguage.googleapis.com';
-  const requestUrl = `${baseHost}/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  // 3. 双轨协议选择：官方直连使用 Gemini 原生 API（避免 CORS 跨域拦截），代理使用 OpenAI 协议
+  const isDirectGemini = !proxyUrl || proxyUrl.trim().includes('generativelanguage.googleapis.com');
 
-  const payload = {
-    contents: [
-      {
-        parts: [
-          {
-            text: prompt,
-          },
-        ],
-      },
-    ],
-    generationConfig: {
-      responseMimeType: 'application/json',
-      temperature: 0.4,
-    },
-    ...(systemInstruction?.trim()
-      ? {
-          systemInstruction: {
-            parts: [{ text: systemInstruction }],
-          },
-        }
-      : {}),
+  let requestUrl = '';
+  let payload: any = {};
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
   };
+
+  if (isDirectGemini) {
+    // 直连官方：使用原生 REST 接口（已由谷歌开启 CORS 许可）
+    requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    payload = {
+      contents: [
+        {
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.4,
+      },
+      ...(systemInstruction?.trim()
+        ? {
+            systemInstruction: {
+              parts: [{ text: systemInstruction }],
+            },
+          }
+        : {}),
+    };
+  } else {
+    // 代理网关：采用标准 OpenAI chat/completions 与 Bearer Auth
+    let baseUrl = proxyUrl.trim().replace(/\/$/, '');
+    if (baseUrl.endsWith('/v1') || baseUrl.includes('/v1/') || baseUrl.includes('/v1beta')) {
+      requestUrl = `${baseUrl}/chat/completions`;
+    } else {
+      requestUrl = `${baseUrl}/v1/chat/completions`;
+    }
+    headers['Authorization'] = `Bearer ${apiKey}`;
+
+    // 在本地开发环境下，通过 Vite 动态代理规避代理服务可能包含的 CORS 限制
+    if (import.meta.env.DEV) {
+      try {
+        const urlObj = new URL(requestUrl);
+        const origin = urlObj.origin;
+        const pathname = urlObj.pathname.replace(/\/$/, '');
+        requestUrl = `/cors-proxy${pathname}`.replace(/\/+/g, '/');
+        headers['X-Target-Url'] = origin;
+      } catch (e) {
+        // 降级处理：若 URL 解析失败，保留原路径直接发起请求
+        console.warn('CORS Proxy URL 解析失败，降级直连:', e);
+        const originalUrl = requestUrl;
+        requestUrl = '/cors-proxy';
+        headers['X-Target-Url'] = originalUrl;
+      }
+    }
+
+    payload = {
+      model,
+      messages: [
+        ...(systemInstruction?.trim() ? [{ role: 'system', content: systemInstruction }] : []),
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.4
+    };
+  }
 
   try {
     const response = await fetch(requestUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(payload),
     });
 
@@ -337,7 +446,13 @@ JSON 结构样例：
     }
 
     const resData = await response.json();
-    const generatedText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+    let generatedText = '';
+
+    if (isDirectGemini) {
+      generatedText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+    } else {
+      generatedText = resData.choices?.[0]?.message?.content;
+    }
 
     if (!generatedText) {
       throw new Error('模型未返回有效的内容。');

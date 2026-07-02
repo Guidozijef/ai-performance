@@ -13,7 +13,8 @@ import {
   formalEmployees, 
   addFormalEmployee, 
   removeFormalEmployee, 
-  resetFormalGenerationStatus
+  resetFormalGenerationStatus,
+  performanceMonth
 } from '../store';
 import type { FormalEmployeeRow } from '../store';
 import { generateFormalPerformance } from '../utils/geminiHelper';
@@ -162,10 +163,11 @@ async function updateExcelBuffer(emp: FormalEmployeeRow): Promise<boolean> {
       excelTemplate.buffer,
       emp.name,
       emp.position,
-      emp.tasks
+      emp.tasks,
+      performanceMonth.value
     );
     emp.outputBuffer = buffer;
-    emp.fileName = `绩效计划表_${emp.name}_${emp.position}_${new Date().toISOString().slice(0, 7)}.xlsx`;
+    emp.fileName = `绩效计划表_${emp.name}_${emp.position}_${performanceMonth.value}.xlsx`;
     return true;
   } catch (e: any) {
     console.error('回写 Excel 缓存失败:', e);
@@ -194,7 +196,8 @@ async function generateSingle(emp: FormalEmployeeRow) {
     emp.name,
     emp.position,
     emp.lastMonthPerformance,
-    emp.thisMonthWorkContent
+    emp.thisMonthWorkContent,
+    performanceMonth.value
   );
 
   if (result.success) {

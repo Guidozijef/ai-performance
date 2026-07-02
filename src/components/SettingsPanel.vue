@@ -6,8 +6,8 @@
  */
 
 import { ref } from 'vue';
-import { geminiConfig } from '../store';
-import { Settings, ShieldAlert, Eye, EyeOff, Save, Check, ChevronDown, ChevronUp } from 'lucide-vue-next';
+import { geminiConfig, performanceMonth, availableModels } from '../store';
+import { Settings, ShieldAlert, Eye, EyeOff, Save, Check, ChevronDown, ChevronUp, RefreshCw, XCircle } from 'lucide-vue-next';
 
 // 控制配置面板的展开与收起状态
 // 若本地已存在 API Key，则默认折叠以节省主面板空间；若未配置则展开引导用户输入
@@ -18,12 +18,13 @@ const showKey = ref(false);
 // 控制保存反馈动效
 const savedFeedback = ref(false);
 
-// 模型选择项
-const modelSelect = ref(
-  ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro'].includes(geminiConfig.model)
-    ? geminiConfig.model
-    : 'custom'
-);
+// 模型请求加载状态
+const isLoadingModels = ref(false);
+const loadModelsError = ref<string | null>(null);
+const loadModelsSuccess = ref(false);
+
+// 模型选择项，初始判断当前配置模型是否是自定义模式
+const modelSelect = ref(geminiConfig.model || 'custom');
 
 /**
  * 保存配置并触发短暂成功勾选效果
@@ -43,6 +44,114 @@ function handleModelSelectChange() {
     geminiConfig.model = modelSelect.value;
   }
   handleSave();
+}
+
+/**
+ * 依据 OpenAI 规范（或官方 Gemini 专属端点）自适应拉取可用模型列表并更新 store
+ */
+async function fetchModels() {
+  isLoadingModels.value = true;
+  loadModelsError.value = null;
+  loadModelsSuccess.value = false;
+
+  const isDirectGemini = !geminiConfig.proxyUrl || geminiConfig.proxyUrl.trim().includes('generativelanguage.googleapis.com');
+
+  let targetUrl = '';
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (isDirectGemini) {
+    // 官方直连：采用官方稳定的 ?key= 进行鉴权，获取 models 属性
+    targetUrl = `https://generativelanguage.googleapis.com/v1/models?key=${geminiConfig.apiKey}`;
+  } else {
+    // 代理/中转网关：自适应拼装 /models 端点，并采用 Authorization: Bearer 进行鉴权
+    let baseUrl = geminiConfig.proxyUrl.trim().replace(/\/$/, '');
+    if (baseUrl.endsWith('/v1')) {
+      targetUrl = `${baseUrl}/models`;
+    } else if (baseUrl.includes('/v1/')) {
+      targetUrl = `${baseUrl}/models`;
+    } else {
+      targetUrl = `${baseUrl}/v1/models`;
+    }
+    if (geminiConfig.apiKey) {
+      headers['Authorization'] = `Bearer ${geminiConfig.apiKey}`;
+    }
+
+    // 在本地开发环境下，通过 Vite 动态代理规避代理服务可能包含的 CORS 限制
+    if (import.meta.env.DEV) {
+      try {
+        const urlObj = new URL(targetUrl);
+        const origin = urlObj.origin;
+        const pathname = urlObj.pathname.replace(/\/$/, '');
+        targetUrl = `/cors-proxy${pathname}`.replace(/\/+/g, '/');
+        headers['X-Target-Url'] = origin;
+      } catch (e) {
+        console.warn('CORS Proxy URL 解析失败，降级直连:', e);
+        const originalUrl = targetUrl;
+        targetUrl = '/cors-proxy';
+        headers['X-Target-Url'] = originalUrl;
+      }
+    }
+  }
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: 'GET',
+      headers,
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`HTTP 异常 ${response.status}: ${errText || '未知错误'}`);
+    }
+
+    const resData = await response.json();
+    let models: string[] = [];
+
+    if (isDirectGemini) {
+      // 解析官方 Gemini /v1/models 响应结构
+      if (resData && Array.isArray(resData.models)) {
+        models = resData.models
+          .map((m: any) => m.name ? m.name.replace(/^models\//, '') : '')
+          .filter((id: string) => id && (id.startsWith('gemini-') || id.startsWith('learn-')))
+          .sort();
+      } else {
+        throw new Error('返回的 JSON 结构不符合 Gemini 官方 models 列表格式（缺 models 属性）。');
+      }
+    } else {
+      // 解析标准 OpenAI /v1/models 响应结构
+      if (resData && Array.isArray(resData.data)) {
+        models = resData.data
+          .map((m: any) => m.id)
+          .filter((id: any) => typeof id === 'string')
+          .sort();
+      } else {
+        throw new Error('返回的 JSON 结构不符合 OpenAI models 列表标准格式（缺 data 属性）。');
+      }
+    }
+
+    if (models.length === 0) {
+      throw new Error('未能在返回的列表中解析出任何合法的模型标示符 (id/name)。');
+    }
+
+    availableModels.value = models;
+    loadModelsSuccess.value = true;
+    
+    // 拉取成功后若当前选定的自定义模型在列表内，则同步将下拉框选中态更改为它，否则归为 custom
+    if (models.includes(geminiConfig.model)) {
+      modelSelect.value = geminiConfig.model;
+    }
+    
+    setTimeout(() => {
+      loadModelsSuccess.value = false;
+    }, 3000);
+  } catch (err: any) {
+    console.error('动态拉取模型列表失败:', err);
+    loadModelsError.value = err.message || '网络连接失败或 CORS 跨域请求被浏览器拦截';
+  } finally {
+    isLoadingModels.value = false;
+  }
 }
 </script>
 
@@ -118,13 +227,37 @@ function handleModelSelectChange() {
         </div>
         <div class="form-group flex-1">
           <label for="modelSelect">AI 模型版本</label>
-          <select id="modelSelect" v-model="modelSelect" class="form-control select-control" @change="handleModelSelectChange">
-            <option value="gemini-2.5-flash">Gemini 2.5 Flash (推荐，新版低成本)</option>
-            <option value="gemini-2.5-pro">Gemini 2.5 Pro (推理更强，适合复杂指标)</option>
-            <option value="gemini-1.5-pro">Gemini 1.5 Pro (旧版强推理)</option>
-            <option value="custom">自定义模型名称...</option>
-          </select>
-          <span class="help-text">推荐选用最新的 2.5 Flash，响应极其迅速。</span>
+          <div class="model-select-wrapper" style="display: flex; gap: 8px; width: 100%;">
+            <select id="modelSelect" v-model="modelSelect" class="form-control select-control" style="flex: 1;" @change="handleModelSelectChange">
+              <optgroup label="已加载的模型列表" v-if="availableModels.length > 0">
+                <option v-for="m in availableModels" :key="m" :value="m">{{ m }}</option>
+              </optgroup>
+              <optgroup label="当前配置模型" v-if="geminiConfig.model && geminiConfig.model !== 'custom' && !availableModels.includes(geminiConfig.model)">
+                <option :value="geminiConfig.model">{{ geminiConfig.model }}</option>
+              </optgroup>
+              <option value="custom">自定义模型名称...</option>
+            </select>
+            <button 
+              type="button" 
+              class="btn btn-outline" 
+              style="padding: 10px 14px; white-space: nowrap; flex-shrink: 0;"
+              :disabled="isLoadingModels" 
+              @click="fetchModels"
+              title="根据当前 API Key 与代理网关拉取可用模型列表"
+            >
+              <RefreshCw :size="16" :class="{ 'animate-spin': isLoadingModels }" />
+              <span>{{ isLoadingModels ? '加载中...' : '加载模型' }}</span>
+            </button>
+          </div>
+          <span class="help-text">支持通过“加载模型”按钮动态获取当前网关配置下的全部可用模型。</span>
+          <!-- 成功和失败提示区 -->
+          <span class="help-text text-success-desc animate-fade-in" v-if="loadModelsSuccess" style="color: #10b981; display: flex; align-items: center; gap: 4px; margin-top: 4px;">
+            ✅ 成功拉取并更新了 {{ availableModels.length }} 个可用模型！
+          </span>
+          <span class="help-text text-danger-desc animate-fade-in" v-if="loadModelsError" style="color: #f87171; display: flex; align-items: center; gap: 4px; margin-top: 4px;">
+            <XCircle :size="14" />
+            <span>加载失败: {{ loadModelsError }}</span>
+          </span>
         </div>
       </div>
 
@@ -141,6 +274,21 @@ function handleModelSelectChange() {
             @change="handleSave"
           />
           <span class="help-text">手动输入最新的 Gemini 模型名称，例如 gemini-3.5-flash 。</span>
+        </div>
+      </div>
+
+      <!-- 绩效周期选择：配置当前需要生成和回写的绩效月份 -->
+      <div class="form-row">
+        <div class="form-group flex-1">
+          <label for="performanceMonth">绩效考核月份</label>
+          <input
+            id="performanceMonth"
+            type="month"
+            v-model="performanceMonth"
+            class="form-control"
+            @change="handleSave"
+          />
+          <span class="help-text">选择要评定的绩效年月。AI 导出的工作目标建议时间、Excel 里的标题/考核周期，以及生成的文件名均将自动适配该月份。</span>
         </div>
       </div>
 
@@ -447,6 +595,19 @@ label {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+.animate-spin {
+  animation: spin 1.5s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
   }
 }
 </style>

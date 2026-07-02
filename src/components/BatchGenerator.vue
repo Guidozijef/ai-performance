@@ -14,7 +14,8 @@ import {
   addEmployee, 
   removeEmployee, 
   clearEmployees,
-  resetGenerationStatus
+  resetGenerationStatus,
+  performanceMonth
 } from '../store';
 import type { EmployeeRow } from '../store';
 import { generateEmployeePerformance } from '../utils/geminiHelper';
@@ -143,7 +144,7 @@ async function generateSingle(row: EmployeeRow) {
     try {
       const nameField = inputMappings.value.find(m => m.label.includes('名') || m.fieldName === 'name');
       const nameVal = nameField ? String(row.inputs[nameField.cellRef] || '未命名') : '员工';
-      row.fileName = `绩效表_${nameVal}_${new Date().toISOString().slice(0, 7)}.xlsx`;
+      row.fileName = `绩效表_${nameVal}_${performanceMonth.value}.xlsx`;
 
       // 组装回写数据 (合并 input 和 aiOutputs)
       const mergedData: Record<string, string | number> = {};

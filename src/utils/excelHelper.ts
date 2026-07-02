@@ -130,7 +130,8 @@ export async function writePerformanceToTemplate(
   templateBuffer: ArrayBuffer,
   name: string,
   position: string,
-  tasks: PerformanceTask[]
+  tasks: PerformanceTask[],
+  targetMonth: string // 考核月份，格式为 YYYY-MM
 ): Promise<ArrayBuffer> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateBuffer.slice(0));
@@ -141,7 +142,47 @@ export async function writePerformanceToTemplate(
     throw new Error(`未能在模板中找到 "${sheetName}" 工作表。`);
   }
 
-  // 1. 写入姓名与岗位 (D3, L3) 并清除红色背景，同时强制设为水平与垂直双向居中对齐
+  // 1. 解析考核年份与月份，并推算当月最后一天日期
+  let year = 2026;
+  let month = 6;
+  let lastDay = 30;
+  if (targetMonth && typeof targetMonth === 'string') {
+    const parts = targetMonth.split('-');
+    if (parts.length === 2) {
+      const parsedYear = parseInt(parts[0], 10);
+      const parsedMonth = parseInt(parts[1], 10);
+      if (!isNaN(parsedYear) && !isNaN(parsedMonth)) {
+        year = parsedYear;
+        month = parsedMonth;
+        lastDay = new Date(year, month, 0).getDate();
+      }
+    }
+  }
+
+  // 2. 动态修改标题 A1 (月员工绩效计划表) 与考核周期 D5，清除硬编码的 "6月" 限制
+  const cellA1 = worksheet.getCell('A1');
+  cellA1.value = {
+    richText: [
+      { text: `${month}月员工绩效计划表 ` },
+      {
+        font: {
+          size: 12,
+          color: { theme: 1 },
+          name: '等线',
+          family: 3,
+          charset: 134,
+          scheme: 'minor'
+        },
+        text: '（基层员工）'
+      }
+    ]
+  };
+
+  const cellD5 = worksheet.getCell('D5');
+  cellD5.value = `${year} 年   ${month}    月   1  日至  ${year}  年  ${month}   月  ${lastDay}  日`;
+  cellD5.alignment = { horizontal: 'center', vertical: 'middle' };
+
+  // 3. 写入姓名与岗位 (D3, L3) 并清除红色背景，同时强制设为水平与垂直双向居中对齐
   const cellD3 = worksheet.getCell('D3');
   cellD3.value = name;
   cellD3.fill = { type: 'pattern', pattern: 'none' };
