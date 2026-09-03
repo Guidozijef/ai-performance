@@ -1,121 +1,126 @@
 <script setup lang="ts">
 /**
- * @fileoverview 正式员工绩效表单（JX1.6套表）自动生成组件。
+ * @fileoverview 正式员工绩效表单自动生成组件。
  * 提供宽屏大卡片工作台、隐藏上月绩效详情以精简视觉、全宽大型本月工作安排编辑框、以及 100% 满宽绩效编辑网格。
- * 导出时自动清除红色背景填充，原样保留 Excel 字体、合并单元格及边框样式。
+ * 默认使用本地预置模板，支持随时上传自定义模板，导出时保留 Excel 字体、合并单元格及边框样式。
  * 遵循 Google TS/Vue 编码标准，包含详细中文注释。
  */
 
-import { ref, onMounted, computed } from 'vue';
-import { 
-  geminiConfig, 
-  excelTemplate, 
-  formalEmployees, 
-  addFormalEmployee, 
-  removeFormalEmployee, 
-  resetFormalGenerationStatus,
-  performanceMonth
-} from '../store';
-import type { FormalEmployeeRow } from '../store';
-import { generateFormalPerformance } from '../utils/geminiHelper';
-import { writePerformanceToTemplate, downloadExcelFile, readPerformanceFromExcel } from '../utils/excelHelper';
-import type { PerformanceTask } from '../utils/excelHelper';
-import { 
-  Users, 
-  Trash2, 
-  Sparkles, 
-  Download, 
-  AlertTriangle, 
-  FileSpreadsheet,
-  RefreshCw,
-  Upload,
-  Plus
-} from 'lucide-vue-next';
+import { ref, onMounted, computed } from "vue";
+import { geminiConfig, excelTemplate, formalEmployees, addFormalEmployee, removeFormalEmployee, resetFormalGenerationStatus, performanceMonth, DEFAULT_TEMPLATE_PATH, DEFAULT_TEMPLATE_NAME, DEFAULT_STANDARDS_PATH, qualityStandards, qualityStandardsLoaded } from "../store";
+import type { FormalEmployeeRow } from "../store";
+import { generateFormalPerformance } from "../utils/geminiHelper";
+import { writePerformanceToTemplate, downloadExcelFile, readPerformanceFromExcel, parseQualityStandards } from "../utils/excelHelper";
+import type { PerformanceTask } from "../utils/excelHelper";
+import { Users, Trash2, Sparkles, Download, AlertTriangle, FileSpreadsheet, RefreshCw, Upload, Plus } from "lucide-vue-next";
 
 // 记录当前正在编辑任务的员工 ID
 const activeEmpId = ref<string | null>(null);
 // 记录批量生成状态
 const isGeneratingBatch = ref(false);
 // 加载提示
-const templateLoadingStatus = ref('');
+const templateLoadingStatus = ref("");
 
 // 计算当前选中的正在编辑绩效计划的员工
 const activeEmployee = computed(() => {
-  return formalEmployees.value.find(emp => emp.id === activeEmpId.value) || null;
+  return formalEmployees.value.find((emp) => emp.id === activeEmpId.value) || null;
 });
 
 // 全局基础校验
 const validationError = computed(() => {
   if (!excelTemplate.buffer) {
-    return '未加载 Excel 模板，请确保 public 下存在模板或上传新模板。';
+    return "未加载 Excel 模板，请确保 public 下存在模板或上传新模板。";
   }
   if (!geminiConfig.apiKey) {
-    return '请先在设置中填写 Gemini API Key。';
+    return "请先在设置中填写 Gemini API Key。";
   }
   if (formalEmployees.value.length === 0) {
-    return '请至少添加一名正式员工。';
+    return "请至少添加一名正式员工。";
   }
-  return '';
+  return "";
 });
 
 // 计算当前正在编辑员工的任务指标规则校验
 // 包含四项核心校验规则：
-// 1. 各项指标权重不超过 30%
-// 2. 指标总权重刚好等于 100%
+// 1. 各项常规指标权重不超过 30%
+// 2. 常规指标总权重刚好等于 100%（扣分项任务免计）
 // 3. 重要战略/关键任务对应的类型必须为 KPI，常规/辅助任务对应的类型必须为 CPI
 // 4. 重要任务比例最低不能低于 20%
 const activeEmpValidationError = computed(() => {
   const emp = activeEmployee.value;
-  if (!emp || emp.status !== 'success' || !emp.tasks || emp.tasks.length === 0) {
-    return '';
+  if (!emp || emp.status !== "success" || !emp.tasks || emp.tasks.length === 0) {
+    return "";
   }
 
-  // 1. 校验权重总和是否为 1.0 (100%)
+  // 1. 校验常规任务权重总和是否为 1.0 (100%)
   const totalW = getTasksTotalWeight(emp.tasks);
   if (Math.abs(totalW - 1.0) > 0.001) {
-    return `总权重为 ${(totalW * 100).toFixed(0)}%，必须刚好等于 100%。`;
+    return `常规考核任务总权重为 ${(totalW * 100).toFixed(0)}%，必须刚好等于 100%（已自动排除扣分项）。`;
   }
 
-  // 2. 校验指标最大限制与最低比例约束
+  // 2. 校验指标最大限制与最低比例约束（排除扣分项）
   for (let i = 0; i < emp.tasks.length; i++) {
     const t = emp.tasks[i];
-    const w = parseFloat(t.weight as any || 0);
-
-    if (w > 0.30001) {
-      return `第 ${i + 1} 项“${t.category || '指标'}”权重为 ${(w * 100).toFixed(0)}%，已超过最大限制 30%。`;
+    if (t.weight === "扣分项" || (typeof t.weight === "string" && t.weight.includes("扣分"))) {
+      continue; // 扣分项不计入 30% 上限与 20% 下限校验
     }
 
-    if (t.level === '重要关键任务' && w < 0.1999) {
+    const w = parseFloat((t.weight as any) || 0);
+
+    if (w > 0.30001) {
+      return `第 ${i + 1} 项“${t.category || "指标"}”权重为 ${(w * 100).toFixed(0)}%，已超过最大限制 30%。`;
+    }
+
+    if (t.level === "重要关键任务" && w < 0.1999) {
       return `重要关键任务（如第 ${i + 1} 项）的权重为 ${(w * 100).toFixed(0)}%，低于最低占比要求 20%。`;
     }
 
-    if ((t.level === '常规执行任务' || t.level === '辅助零散任务') && t.type !== 'CPI') {
+    if ((t.level === "常规执行任务" || t.level === "辅助零散任务") && t.type !== "CPI") {
       return `常规/辅助任务（如第 ${i + 1} 项）类型当前为 ${t.type}，必须设为 CPI。`;
     }
   }
 
-  return '';
+  return "";
 });
 
 /**
- * 组件加载时自动拉取 Public 下的默认 Excel 模板文件
+ * 组件加载时自动拉取 Public 下的默认 Excel 模板文件与质量标准库
  */
 onMounted(async () => {
+  // 1. 加载默认 Excel 模板
   if (!excelTemplate.buffer) {
-    templateLoadingStatus.value = '正在自动加载预置绩效模板 JX1.6...';
+    templateLoadingStatus.value = `正在自动加载预置绩效模板 (${DEFAULT_TEMPLATE_NAME})...`;
     try {
-      const response = await fetch('/正式员工绩效表单套表-JX1.6.xlsx');
+      const response = await fetch(DEFAULT_TEMPLATE_PATH);
       if (response.ok) {
         const buffer = await response.arrayBuffer();
         excelTemplate.buffer = buffer;
-        excelTemplate.fileName = '正式员工绩效表单套表-JX1.6.xlsx (预置)';
-        templateLoadingStatus.value = '成功载入预置绩效模板 JX1.6';
+        excelTemplate.fileName = DEFAULT_TEMPLATE_NAME;
+        excelTemplate.isCustom = false;
+        templateLoadingStatus.value = `已载入预置模板: ${DEFAULT_TEMPLATE_NAME}`;
       } else {
-        templateLoadingStatus.value = '未找到预置绩效模板，请上传模板文件。';
+        templateLoadingStatus.value = "未找到预置绩效模板，请手动上传模板文件。";
       }
     } catch (e) {
-      console.error('加载预置模板失败:', e);
-      templateLoadingStatus.value = '加载预置模板失败，请手动上传。';
+      console.error("加载预置模板失败:", e);
+      templateLoadingStatus.value = "加载预置模板失败，请手动上传。";
+    }
+  } else {
+    templateLoadingStatus.value = `已载入模板: ${excelTemplate.fileName}`;
+  }
+
+  // 2. 自动加载并解析企业绩效质量标准库
+  if (qualityStandards.value.length === 0) {
+    try {
+      const res = await fetch(DEFAULT_STANDARDS_PATH);
+      if (res.ok) {
+        const buf = await res.arrayBuffer();
+        const list = await parseQualityStandards(buf);
+        qualityStandards.value = list;
+        qualityStandardsLoaded.value = true;
+      }
+    } catch (err) {
+      console.warn("加载绩效质量标准库失败:", err);
     }
   }
 
@@ -141,14 +146,22 @@ async function handleTemplateUpload(event: Event) {
   const file = files[0];
   try {
     const arrayBuffer = await file.arrayBuffer();
-    excelTemplate.fileName = `${file.name} (手动上传)`;
+    excelTemplate.fileName = file.name;
     excelTemplate.buffer = arrayBuffer;
-    templateLoadingStatus.value = '成功载入自定义绩效模板';
+    excelTemplate.isCustom = true;
+    templateLoadingStatus.value = `已载入自定义模板: ${file.name}`;
+
+    // 如果已有成功生成的员工，重新刷新其导出的 buffer
+    formalEmployees.value.forEach((emp) => {
+      if (emp.status === "success" && emp.tasks.length > 0) {
+        updateExcelBuffer(emp);
+      }
+    });
   } catch (error: any) {
-    console.error('解析模板失败:', error);
-    templateLoadingStatus.value = '自定义模板载入失败，请检查文件。';
+    console.error("解析模板失败:", error);
+    templateLoadingStatus.value = "自定义模板载入失败，请检查文件。";
   } finally {
-    target.value = '';
+    target.value = "";
   }
 }
 
@@ -159,20 +172,20 @@ async function updateExcelBuffer(emp: FormalEmployeeRow): Promise<boolean> {
   if (!excelTemplate.buffer || emp.tasks.length === 0) return false;
 
   try {
-    const buffer = await writePerformanceToTemplate(
-      excelTemplate.buffer,
-      emp.name,
-      emp.position,
-      emp.tasks,
-      performanceMonth.value
-    );
+    const buffer = await writePerformanceToTemplate(excelTemplate.buffer, emp.name, emp.position, emp.tasks, performanceMonth.value, {
+      company: emp.company,
+      department: emp.department,
+      evaluator: emp.evaluator,
+      evaluatorDepartment: emp.evaluatorDepartment,
+      evaluatorPosition: emp.evaluatorPosition,
+    });
     emp.outputBuffer = buffer;
     emp.fileName = `绩效计划表_${emp.name}_${emp.position}_${performanceMonth.value}.xlsx`;
     return true;
   } catch (e: any) {
-    console.error('回写 Excel 缓存失败:', e);
+    console.error("回写 Excel 缓存失败:", e);
     emp.errorMessage = `回写 Excel 失败: ${e.message}`;
-    emp.status = 'error';
+    emp.status = "error";
     return false;
   }
 }
@@ -182,7 +195,7 @@ async function updateExcelBuffer(emp: FormalEmployeeRow): Promise<boolean> {
  */
 async function generateSingle(emp: FormalEmployeeRow) {
   if (!geminiConfig.apiKey) return;
-  emp.status = 'generating';
+  emp.status = "generating";
   emp.errorMessage = undefined;
   emp.tasks = [];
 
@@ -191,31 +204,31 @@ async function generateSingle(emp: FormalEmployeeRow) {
       apiKey: geminiConfig.apiKey,
       proxyUrl: geminiConfig.proxyUrl,
       model: geminiConfig.model,
-      systemInstruction: geminiConfig.systemInstruction
+      systemInstruction: geminiConfig.systemInstruction,
     },
     emp.name,
     emp.position,
     emp.lastMonthPerformance,
     emp.thisMonthWorkContent,
-    performanceMonth.value
+    performanceMonth.value,
+    qualityStandards.value, // 注入绩效质量标准库
   );
 
   if (result.success) {
     emp.tasks = result.tasks;
     emp.name = result.name;
     emp.position = result.position;
-    
+
     // 渲染回写并清除红色背景
     const successWrite = await updateExcelBuffer(emp);
     if (successWrite) {
-      emp.status = 'success';
+      emp.status = "success";
     }
   } else {
     emp.errorMessage = result.message;
-    emp.status = 'error';
+    emp.status = "error";
   }
 }
-
 
 /**
  * 触发单个下载
@@ -229,7 +242,7 @@ function downloadSingle(emp: FormalEmployeeRow) {
  * 一键下载所有生成的 Excel
  */
 function downloadAll() {
-  const successRows = formalEmployees.value.filter(emp => emp.status === 'success' && emp.outputBuffer && emp.fileName);
+  const successRows = formalEmployees.value.filter((emp) => emp.status === "success" && emp.outputBuffer && emp.fileName);
   successRows.forEach((emp, index) => {
     setTimeout(() => {
       if (emp.outputBuffer && emp.fileName) {
@@ -244,17 +257,17 @@ function downloadAll() {
  */
 function addTask(emp: FormalEmployeeRow) {
   emp.tasks.push({
-    type: 'KPI',
-    level: '重要关键任务',
+    type: "KPI",
+    level: "重要关键任务",
     weight: 0.25,
-    category: '系统开发',
-    description: '新增的考核任务',
-    time_target: '当月月底前',
-    count_target: '/',
-    quality_target: '1.按时按质交付开发任务\n2.单元测试通过率达100%',
-    time_standard: '每延迟一天扣2分',
-    count_standard: '/',
-    quality_standard: '1.未按原型要求交付该项扣10分\n2.收到投诉扣2分/次'
+    category: "系统开发",
+    description: "新增的考核任务",
+    time_target: "当月月底前",
+    count_target: "/",
+    quality_target: "1.按时按质交付开发任务\n2.单元测试通过率达100%",
+    time_standard: "每延迟一天扣2分",
+    count_standard: "/",
+    quality_standard: "1.未按原型要求交付该项扣10分\n2.收到投诉扣2分/次",
   });
   updateExcelBuffer(emp);
 }
@@ -268,10 +281,15 @@ function removeTask(emp: FormalEmployeeRow, index: number) {
 }
 
 /**
- * 校验当前任务的总权重是否为 1.0 (100%)
+ * 校验当前常规任务的总权重是否为 1.0 (100%)（自动排除“扣分项”等非数值任务）
  */
 function getTasksTotalWeight(tasks: PerformanceTask[]): number {
-  return tasks.reduce((sum, t) => sum + parseFloat(t.weight as any || 0), 0);
+  return tasks
+    .filter((t) => t.weight !== "扣分项" && !(typeof t.weight === "string" && t.weight.includes("扣分")))
+    .reduce((sum, t) => {
+      const val = typeof t.weight === "number" ? t.weight : parseFloat(t.weight);
+      return sum + (isNaN(val) ? 0 : val);
+    }, 0);
 }
 
 /**
@@ -294,7 +312,7 @@ function handleAddEmployee() {
 function handleRemoveActive() {
   if (!activeEmpId.value) return;
   const currentId = activeEmpId.value;
-  const index = formalEmployees.value.findIndex(emp => emp.id === currentId);
+  const index = formalEmployees.value.findIndex((emp) => emp.id === currentId);
   removeFormalEmployee(currentId);
   if (formalEmployees.value.length > 0) {
     const nextIndex = Math.max(0, index - 1);
@@ -315,28 +333,46 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   const file = files[0];
   try {
     const data = await readPerformanceFromExcel(file);
-    
-    // 自动回填姓名与岗位
+
+    // 自动回填公司、部门、姓名、岗位、考核人等所有头部信息
     if (data.name) emp.name = data.name;
     if (data.position) emp.position = data.position;
-    
+    if (data.company) emp.company = data.company;
+    if (data.department) emp.department = data.department;
+    if (data.evaluator) emp.evaluator = data.evaluator;
+    if (data.evaluatorDepartment) emp.evaluatorDepartment = data.evaluatorDepartment;
+    if (data.evaluatorPosition) emp.evaluatorPosition = data.evaluatorPosition;
+
     // 格式化上月指标，用于 Gemini 提示上下文
-    const taskSummary = data.tasks.map((t: PerformanceTask, idx: number) => {
-      return `【任务 ${idx + 1}】
-- 类型: ${t.type} (${t.level}) | 权重: ${(t.weight * 100).toFixed(0)}% | 板块: ${t.category}
+    const taskSummary = data.tasks
+      .map((t: PerformanceTask, idx: number) => {
+        const weightStr = typeof t.weight === "number" ? `${(t.weight * 100).toFixed(0)}%` : t.weight || "扣分项";
+        return `【任务 ${idx + 1}】
+- 类型: ${t.type} (${t.level}) | 权重: ${weightStr} | 板块: ${t.category}
 - 任务描述: ${t.description}
 - 时间目标: ${t.time_target} | 数量目标: ${t.count_target}
 - 质量目标: ${t.quality_target}
 - 时间标准: ${t.time_standard} | 数量标准: ${t.count_standard}
 - 质量标准: ${t.quality_standard}`;
-    }).join('\n\n');
+      })
+      .join("\n\n");
 
-    emp.lastMonthPerformance = `[已解析自上月绩效 Excel] ${file.name}\n姓名：${data.name} | 岗位：${data.position}\n\n上月考核项回顾：\n${taskSummary}`;
+    emp.lastMonthPerformance = `[已解析自上月绩效 Excel] ${file.name}
+所属公司：${data.company || "无"} | 所属部门：${data.department || "无"}
+被考核人：${data.name} | 岗位：${data.position} | 考核人：${data.evaluator || "无"}
+
+上月考核项回顾：
+${taskSummary}`;
+
+    // 如果已有生成的任务，重新刷新导出的二进制 buffer
+    if (emp.status === "success" && emp.tasks.length > 0) {
+      updateExcelBuffer(emp);
+    }
   } catch (error: any) {
-    console.error('解析上月绩效 Excel 失败:', error);
-    alert(`解析失败: ${error.message || '文件格式错误'}`);
+    console.error("解析上月绩效 Excel 失败:", error);
+    alert(`解析失败: ${error.message || "文件格式错误"}`);
   } finally {
-    target.value = '';
+    target.value = "";
   }
 }
 </script>
@@ -346,14 +382,18 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
     <!-- 头部栏 -->
     <div class="card-header">
       <FileSpreadsheet class="header-icon" />
-      <h2>正式员工绩效智能填报 (JX1.6 套表专区)</h2>
+      <div class="header-title-group">
+        <h2>正式员工绩效智能填报</h2>
+        <span class="header-subtitle" v-if="excelTemplate.fileName">({{ excelTemplate.fileName }})</span>
+        <span class="standards-badge" v-if="qualityStandards.length > 0">🎯 已联动质量标准库 ({{ qualityStandards.length }}条规范)</span>
+      </div>
       <div class="header-actions">
         <span class="template-status-tag" :class="{ ok: excelTemplate.buffer }">
-          {{ templateLoadingStatus || '未检测到模板' }}
+          {{ excelTemplate.fileName ? `已载入: ${excelTemplate.fileName}` : templateLoadingStatus || "未检测到模板" }}
         </span>
         <label class="btn btn-outline btn-sm-upload">
           <input type="file" accept=".xlsx" class="hidden-input" @change="handleTemplateUpload" />
-          <span>更换 Excel 模板</span>
+          <span>{{ excelTemplate.fileName ? "更换 Excel 模板" : "上传 Excel 模板" }}</span>
         </label>
       </div>
     </div>
@@ -367,15 +407,9 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 
       <!-- 员工选择 Tabs 导航 (全屏横排) -->
       <div class="employee-tabs">
-        <button 
-          v-for="emp in formalEmployees" 
-          :key="emp.id" 
-          class="emp-tab"
-          :class="{ active: emp.id === activeEmpId, success: emp.status === 'success' }"
-          @click="activeEmpId = emp.id"
-        >
+        <button v-for="emp in formalEmployees" :key="emp.id" class="emp-tab" :class="{ active: emp.id === activeEmpId, success: emp.status === 'success' }" @click="activeEmpId = emp.id">
           <Users :size="14" class="tab-icon" />
-          <span class="emp-tab-name">{{ emp.name || '新员工' }}</span>
+          <span class="emp-tab-name">{{ emp.name || "新员工" }}</span>
           <span class="emp-tab-pos" v-if="emp.position">({{ emp.position }})</span>
           <span class="emp-tab-badge" :class="emp.status"></span>
         </button>
@@ -387,45 +421,41 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 
       <!-- 核心工作台：大型输入配置区 (满宽卡片) -->
       <div class="input-panel-card" v-if="activeEmployee">
-        <!-- 员工信息与导入行 -->
+        <!-- 员工头部信息与导入配置 -->
         <div class="panel-row">
-          <div class="form-group w-30">
+          <div class="form-group w-20">
             <label>被考核人姓名 (D3)</label>
-            <input 
-              type="text" 
-              v-model="activeEmployee.name" 
-              class="form-control" 
-              placeholder="例如：杨砚翔" 
-              :disabled="isGeneratingBatch"
-            />
+            <input type="text" v-model="activeEmployee.name" class="form-control" placeholder="例如：杨砚翔" :disabled="isGeneratingBatch" @change="updateExcelBuffer(activeEmployee)" />
           </div>
-          <div class="form-group w-30">
+          <div class="form-group w-20">
             <label>岗位名称 (L3)</label>
-            <input 
-              type="text" 
-              v-model="activeEmployee.position" 
-              class="form-control" 
-              placeholder="例如：APP开发工程师" 
-              :disabled="isGeneratingBatch"
-            />
+            <input type="text" v-model="activeEmployee.position" class="form-control" placeholder="例如：APP开发工程师" :disabled="isGeneratingBatch" @change="updateExcelBuffer(activeEmployee)" />
           </div>
-          <div class="form-group w-40 file-upload-wrapper">
-            <label>上月绩效数据源 (智能回填并参考)</label>
+          <div class="form-group w-20">
+            <label>所属部门 (H3/H4)</label>
+            <input type="text" v-model="activeEmployee.department" class="form-control" placeholder="默认：软件研发部" :disabled="isGeneratingBatch" @change="updateExcelBuffer(activeEmployee)" />
+          </div>
+          <div class="form-group w-20">
+            <label>所属公司 (D2)</label>
+            <input type="text" v-model="activeEmployee.company" class="form-control" placeholder="默认：四川久宏川科技有限公司" :disabled="isGeneratingBatch" @change="updateExcelBuffer(activeEmployee)" />
+          </div>
+          <div class="form-group w-20">
+            <label>考核人姓名 (D4)</label>
+            <input type="text" v-model="activeEmployee.evaluator" class="form-control" placeholder="默认：李杰、张剑锋" :disabled="isGeneratingBatch" @change="updateExcelBuffer(activeEmployee)" />
+          </div>
+        </div>
+
+        <!-- 快速导入上一周期数据 -->
+        <div class="panel-row">
+          <div class="form-group w-100 file-upload-wrapper">
+            <label>上月绩效数据源 (一键导入上月已填写的 Excel，自动回填公司、部门、考核人及历史考核任务)</label>
             <div class="file-upload-row">
               <label class="btn btn-outline upload-btn-full" :class="{ 'has-file': activeEmployee.lastMonthPerformance }">
                 <Upload :size="15" />
-                <span>{{ activeEmployee.lastMonthPerformance ? '重新导入上月 Excel' : '直接导入上月已填写 Excel' }}</span>
-                <input 
-                  type="file" 
-                  accept=".xlsx" 
-                  class="hidden-input" 
-                  @change="(e) => handleLastMonthExcelUpload(e, activeEmployee!)" 
-                  :disabled="isGeneratingBatch"
-                />
+                <span>{{ activeEmployee.lastMonthPerformance ? "重新导入上月 Excel 表单" : "一键导入上月 Excel 表单 (自动回填公司/部门/考核人/历史任务)" }}</span>
+                <input type="file" accept=".xlsx" class="hidden-input" @change="(e) => handleLastMonthExcelUpload(e, activeEmployee!)" :disabled="isGeneratingBatch" />
               </label>
-              <span class="imported-success-badge" v-if="activeEmployee.lastMonthPerformance">
-                ✅ 已解析上月任务
-              </span>
+              <span class="imported-success-badge" v-if="activeEmployee.lastMonthPerformance">✅ 已解析并同步上月头部信息与工作任务</span>
             </div>
           </div>
         </div>
@@ -433,33 +463,17 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
         <!-- 本月工作安排核心输入区：超大文本框，方便大屏下录入本月详细工作规划与要求 -->
         <div class="form-group margin-top">
           <label class="large-label">本月主要工作内容安排与计划要求 (AI 将依据此安排生成可量化的质量目标与标准，请尽量详细描述)</label>
-          <textarea 
-            v-model="activeEmployee.thisMonthWorkContent" 
-            rows="12" 
-            placeholder="请在此输入本月任务计划，可分行描述，例如：&#10;1. 甲烷探测器APP开发：完成手持端视频播放、图片截图和历史报警查询功能。&#10;2. 无人机模块升级：配合后端实现V2.1.8版本安卓端和鸿蒙端的完整对接与联调。&#10;3. 测试BUG整改：负责解决测试人员反馈的APP侧缺陷，BUG解决率需达到90%以上。" 
-            class="form-control textarea large-textarea"
-            :disabled="isGeneratingBatch"
-          ></textarea>
+          <textarea v-model="activeEmployee.thisMonthWorkContent" rows="12" placeholder="请在此输入本月任务计划，可分行描述，例如：&#10;1. 甲烷探测器APP开发：完成手持端视频播放、图片截图和历史报警查询功能。&#10;2. 无人机模块升级：配合后端实现V2.1.8版本安卓端和鸿蒙端的完整对接与联调。&#10;3. 测试BUG整改：负责解决测试人员反馈的APP侧缺陷，BUG解决率需达到90%以上。" class="form-control textarea large-textarea" :disabled="isGeneratingBatch"></textarea>
         </div>
 
         <!-- 控制按钮行 -->
         <div class="panel-actions">
-          <button 
-            type="button" 
-            class="btn btn-primary btn-lg" 
-            :disabled="!geminiConfig.apiKey || activeEmployee.status === 'generating' || isGeneratingBatch"
-            @click="generateSingle(activeEmployee)"
-          >
+          <button type="button" class="btn btn-primary btn-lg" :disabled="!geminiConfig.apiKey || activeEmployee.status === 'generating' || isGeneratingBatch" @click="generateSingle(activeEmployee)">
             <Sparkles :size="16" />
-            <span>{{ activeEmployee.status === 'success' ? '重新智能推导本月绩效' : '开始智能推导本月绩效' }}</span>
+            <span>{{ activeEmployee.status === "success" ? "重新智能推导本月绩效" : "开始智能推导本月绩效" }}</span>
           </button>
-          
-          <button 
-            type="button" 
-            class="btn btn-outline text-danger btn-lg" 
-            @click="handleRemoveActive"
-            :disabled="isGeneratingBatch || formalEmployees.length <= 1"
-          >
+
+          <button type="button" class="btn btn-outline text-danger btn-lg" @click="handleRemoveActive" :disabled="isGeneratingBatch || formalEmployees.length <= 1">
             <Trash2 :size="16" />
             <span>删除此员工</span>
           </button>
@@ -469,33 +483,29 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
       <!-- 下部分：大屏预览与编辑区域 (100% 宽度，仿 Excel 网格样式) -->
       <div class="spreadsheet-panel-card" v-if="activeEmployee">
         <div class="section-title-row">
-          <div class="title-group" style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
+          <div class="title-group" style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap">
             <span class="section-title">
-              本月绩效计划书网格预览：<strong class="text-accent">{{ activeEmployee.name || '未命名' }}</strong>
+              本月绩效计划书网格预览：
+              <strong class="text-accent">{{ activeEmployee.name || "未命名" }}</strong>
             </span>
             <!-- 规则验证指示器 -->
             <div class="active-validation-warning" v-if="activeEmpValidationError">
-              <AlertTriangle :size="14" style="color: #ef4444;" />
+              <AlertTriangle :size="14" style="color: #ef4444" />
               <span>规则警示: {{ activeEmpValidationError }}</span>
             </div>
           </div>
           <div class="right-actions" v-if="activeEmployee.status === 'success' && activeEmployee.tasks.length > 0">
             <!-- 权重检测 -->
-            <span 
-              class="weight-badge" 
-              :class="{ 
-                ok: Math.abs(getTasksTotalWeight(activeEmployee.tasks) - 1.0) < 0.001 
+            <span
+              class="weight-badge"
+              :class="{
+                ok: Math.abs(getTasksTotalWeight(activeEmployee.tasks) - 1.0) < 0.001,
               }"
             >
-              权重之和: {{ (getTasksTotalWeight(activeEmployee.tasks) * 100).toFixed(0) }}%
-              ({{ Math.abs(getTasksTotalWeight(activeEmployee.tasks) - 1.0) < 0.001 ? '符合 100%' : '未达 100%' }})
+              权重之和: {{ (getTasksTotalWeight(activeEmployee.tasks) * 100).toFixed(0) }}% ({{ Math.abs(getTasksTotalWeight(activeEmployee.tasks) - 1.0) < 0.001 ? "符合 100%" : "未达 100%" }})
             </span>
-            
-            <button 
-              type="button" 
-              class="btn btn-primary" 
-              @click="downloadSingle(activeEmployee)"
-            >
+
+            <button type="button" class="btn btn-primary" @click="downloadSingle(activeEmployee)">
               <Download :size="15" />
               <span>导出已填报 Excel</span>
             </button>
@@ -528,7 +538,7 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
                 <tr v-for="(task, index) in activeEmployee.tasks" :key="index">
                   <!-- 序号 -->
                   <td class="cell-seq-num">{{ index + 1 }}</td>
-                  
+
                   <!-- 指标类型 (KPI / CPI) -->
                   <td>
                     <select v-model="task.type" class="grid-select" @change="handleCellChange(activeEmployee)">
@@ -549,102 +559,52 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 
                   <!-- 权重 -->
                   <td>
-                    <input 
-                      type="number" 
-                      step="0.05" 
-                      min="0" 
-                      max="1"
-                      v-model.number="task.weight" 
-                      class="grid-input text-center bold-text" 
-                      @change="handleCellChange(activeEmployee)"
-                    />
+                    <input type="text" v-model="task.weight" class="grid-input text-center bold-text" placeholder="如 0.25 或 扣分项" @change="handleCellChange(activeEmployee)" />
                   </td>
 
                   <!-- 所属板块 -->
                   <td>
-                    <input 
-                      type="text" 
-                      v-model="task.category" 
-                      class="grid-input" 
-                      @change="handleCellChange(activeEmployee)"
-                    />
+                    <input type="text" v-model="task.category" class="grid-input" @change="handleCellChange(activeEmployee)" />
                   </td>
 
                   <!-- 解释说明 -->
                   <td>
-                    <textarea 
-                      v-model="task.description" 
-                      class="grid-textarea" 
-                      @change="handleCellChange(activeEmployee)"
-                    ></textarea>
+                    <textarea v-model="task.description" class="grid-textarea" @change="handleCellChange(activeEmployee)"></textarea>
                   </td>
 
                   <!-- 时间目标 -->
                   <td>
-                    <input 
-                      type="text" 
-                      v-model="task.time_target" 
-                      class="grid-input" 
-                      @change="handleCellChange(activeEmployee)"
-                    />
+                    <input type="text" v-model="task.time_target" class="grid-input" @change="handleCellChange(activeEmployee)" />
                   </td>
 
                   <!-- 数量目标 -->
                   <td>
-                    <input 
-                      type="text" 
-                      v-model="task.count_target" 
-                      class="grid-input text-center" 
-                      @change="handleCellChange(activeEmployee)"
-                    />
+                    <input type="text" v-model="task.count_target" class="grid-input text-center" @change="handleCellChange(activeEmployee)" />
                   </td>
 
                   <!-- 质量目标 -->
                   <td class="highlight-objective">
-                    <textarea 
-                      v-model="task.quality_target" 
-                      class="grid-textarea font-s" 
-                      @change="handleCellChange(activeEmployee)"
-                    ></textarea>
+                    <textarea v-model="task.quality_target" class="grid-textarea font-s" @change="handleCellChange(activeEmployee)"></textarea>
                   </td>
 
                   <!-- 时间标准 -->
                   <td>
-                    <textarea 
-                      v-model="task.time_standard" 
-                      class="grid-textarea font-s" 
-                      @change="handleCellChange(activeEmployee)"
-                    ></textarea>
+                    <textarea v-model="task.time_standard" class="grid-textarea font-s" @change="handleCellChange(activeEmployee)"></textarea>
                   </td>
 
                   <!-- 数量标准 -->
                   <td>
-                    <input 
-                      type="text" 
-                      v-model="task.count_standard" 
-                      class="grid-input text-center" 
-                      @change="handleCellChange(activeEmployee)"
-                    />
+                    <input type="text" v-model="task.count_standard" class="grid-input text-center" @change="handleCellChange(activeEmployee)" />
                   </td>
 
                   <!-- 质量标准 -->
                   <td class="highlight-objective">
-                    <textarea 
-                      v-model="task.quality_standard" 
-                      class="grid-textarea font-s" 
-                      @change="handleCellChange(activeEmployee)"
-                    ></textarea>
+                    <textarea v-model="task.quality_standard" class="grid-textarea font-s" @change="handleCellChange(activeEmployee)"></textarea>
                   </td>
 
                   <!-- 删除单行 -->
                   <td class="text-center">
-                    <button 
-                      type="button" 
-                      class="grid-action-delete" 
-                      @click="removeTask(activeEmployee, index)"
-                      :disabled="activeEmployee.tasks.length <= 4"
-                      title="删除该任务行"
-                    >
+                    <button type="button" class="grid-action-delete" @click="removeTask(activeEmployee, index)" :disabled="activeEmployee.tasks.length <= 4" title="删除该任务行">
                       <Trash2 :size="13" />
                     </button>
                   </td>
@@ -679,20 +639,17 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
             <AlertTriangle :size="48" class="text-danger" />
             <h3>推导失败</h3>
             <p class="text-danger-detail">{{ activeEmployee.errorMessage }}</p>
-            <button type="button" class="btn btn-primary" @click="generateSingle(activeEmployee)">
-              重新生成
-            </button>
+            <button type="button" class="btn btn-primary" @click="generateSingle(activeEmployee)">重新生成</button>
           </div>
         </div>
       </div>
 
       <!-- 全局批量打包控制栏 -->
-      <div 
-        class="footer-actions-bar" 
-        v-if="formalEmployees.length > 0 && formalEmployees.some(e => e.status === 'success')"
-      >
+      <div class="footer-actions-bar" v-if="formalEmployees.length > 0 && formalEmployees.some((e) => e.status === 'success')">
         <div class="left-stats">
-          已成功推导 <strong>{{ formalEmployees.filter(e => e.status === 'success').length }}</strong> / {{ formalEmployees.length }} 份正式绩效计划书
+          已成功推导
+          <strong>{{ formalEmployees.filter((e) => e.status === "success").length }}</strong>
+          / {{ formalEmployees.length }} 份正式绩效计划书
         </div>
         <div class="right-buttons">
           <button type="button" class="btn btn-outline" @click="resetFormalGenerationStatus" :disabled="isGeneratingBatch">
@@ -727,13 +684,36 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   color: var(--accent);
 }
 
+.header-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-grow: 1;
+  flex-wrap: wrap;
+}
+
 .card-header h2 {
   margin: 0;
   font-size: 1.25rem;
   font-weight: 600;
   color: var(--text-h);
-  flex-grow: 1;
   text-align: left;
+}
+
+.header-subtitle {
+  font-size: 0.85rem;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.standards-badge {
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  border-radius: 20px;
+  background: rgba(168, 85, 247, 0.15);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  color: #c084fc;
+  font-weight: 500;
 }
 
 .header-actions {
@@ -808,7 +788,7 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   gap: 8px;
   border: 1px solid var(--border);
   border-bottom: none;
-  background: rgba(255,255,255,0.02);
+  background: rgba(255, 255, 255, 0.02);
   color: var(--text);
   padding: 10px 18px;
   font-size: 0.85rem;
@@ -821,7 +801,7 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 }
 
 .emp-tab:hover:not(.active) {
-  background: rgba(255,255,255,0.06);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text-h);
 }
 
@@ -851,10 +831,19 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   background: var(--text);
 }
 
-.emp-tab-badge.idle { background: var(--text); }
-.emp-tab-badge.generating { background: var(--accent); animation: pulse 1.5s infinite; }
-.emp-tab-badge.success { background: #10b981; }
-.emp-tab-badge.error { background: #ef4444; }
+.emp-tab-badge.idle {
+  background: var(--text);
+}
+.emp-tab-badge.generating {
+  background: var(--accent);
+  animation: pulse 1.5s infinite;
+}
+.emp-tab-badge.success {
+  background: #10b981;
+}
+.emp-tab-badge.error {
+  background: #ef4444;
+}
 
 .tab-icon {
   opacity: 0.6;
@@ -891,11 +880,33 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
   flex-wrap: wrap;
 }
 
-.w-30 { width: calc(30% - 10px); }
-.w-40 { width: calc(40% - 10px); }
+.w-20 {
+  width: calc(20% - 16px);
+}
+.w-30 {
+  width: calc(30% - 10px);
+}
+.w-40 {
+  width: calc(40% - 10px);
+}
+.w-50 {
+  width: calc(50% - 10px);
+}
+.w-100 {
+  width: 100%;
+}
 
-@media (max-width: 900px) {
-  .w-30, .w-40 {
+@media (max-width: 1100px) {
+  .w-20 {
+    width: calc(33.333% - 14px);
+  }
+}
+
+@media (max-width: 768px) {
+  .w-20,
+  .w-30,
+  .w-40,
+  .w-50 {
     width: 100%;
   }
 }
@@ -934,7 +945,7 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 .form-control:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-bg);
-  background: rgba(255,255,255,0.06);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .textarea {
@@ -992,7 +1003,7 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 .history-collapse-section {
   border: 1px dashed var(--border);
   border-radius: 6px;
-  background: rgba(255,255,255,0.005);
+  background: rgba(255, 255, 255, 0.005);
   overflow: hidden;
 }
 
@@ -1054,7 +1065,7 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 .spreadsheet-container {
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: rgba(255,255,255,0.002);
+  background: rgba(255, 255, 255, 0.002);
   overflow: hidden;
   min-height: 250px;
   display: flex;
@@ -1092,27 +1103,55 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 }
 
 .excel-grid tr:hover td {
-  background: rgba(255,255,255,0.01);
+  background: rgba(255, 255, 255, 0.01);
 }
 
 /* 列宽微调 - 加宽以满足大屏编辑与预览需求 */
-.col-seq { width: 45px; text-align: center; }
-.col-type { width: 85px; }
-.col-level { width: 140px; }
-.col-weight { width: 100px; }
-.col-cat { width: 110px; }
-.col-desc { min-width: 220px; } /* 原 180px */
-.col-time { width: 150px; }      /* 原 105px */
-.col-count { width: 65px; }
-.col-quality { min-width: 300px; } /* 原 200px */
-.col-time-std { min-width: 130px; } /* 原 150px */
-.col-count-std { width: 85px; }
-.col-quality-std { min-width: 300px; } /* 原 200px */
-.col-action { width: 45px; text-align: center; }
+.col-seq {
+  width: 45px;
+  text-align: center;
+}
+.col-type {
+  width: 85px;
+}
+.col-level {
+  width: 140px;
+}
+.col-weight {
+  width: 100px;
+}
+.col-cat {
+  width: 110px;
+}
+.col-desc {
+  min-width: 220px;
+} /* 原 180px */
+.col-time {
+  width: 150px;
+} /* 原 105px */
+.col-count {
+  width: 65px;
+}
+.col-quality {
+  min-width: 300px;
+} /* 原 200px */
+.col-time-std {
+  min-width: 130px;
+} /* 原 150px */
+.col-count-std {
+  width: 85px;
+}
+.col-quality-std {
+  min-width: 300px;
+} /* 原 200px */
+.col-action {
+  width: 45px;
+  text-align: center;
+}
 
 .cell-seq-num {
   text-align: center;
-  background: rgba(255,255,255,0.015);
+  background: rgba(255, 255, 255, 0.015);
   font-weight: 600;
   color: var(--text);
   user-select: none;
@@ -1134,12 +1173,12 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 
 .grid-input:hover {
   border-color: rgba(255, 255, 255, 0.15);
-  background: rgba(255,255,255,0.02);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .grid-input:focus {
   border-color: var(--accent);
-  background: rgba(255,255,255,0.06);
+  background: rgba(255, 255, 255, 0.06);
   box-shadow: 0 0 0 2px var(--accent-bg);
 }
 
@@ -1199,12 +1238,12 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 
 .grid-textarea:hover {
   border-color: rgba(255, 255, 255, 0.15);
-  background: rgba(255,255,255,0.02);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .grid-textarea:focus {
   border-color: var(--accent);
-  background: rgba(255,255,255,0.06);
+  background: rgba(255, 255, 255, 0.06);
   box-shadow: 0 0 0 2px var(--accent-bg);
 }
 
@@ -1398,12 +1437,21 @@ async function handleLastMonthExcelUpload(event: Event, emp: FormalEmployeeRow) 
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.1); opacity: 0.5; }
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.5;
+  }
 }
 
 /* 核心网格预览区辅助样式 */

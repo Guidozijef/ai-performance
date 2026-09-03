@@ -6,7 +6,14 @@
  */
 
 import { reactive, ref, watch } from 'vue';
-import type { CellMapping, PerformanceTask } from '../utils/excelHelper';
+import type { CellMapping, PerformanceTask, QualityStandardItem } from '../utils/excelHelper';
+import {
+  DEFAULT_FORMAL_COMPANY,
+  DEFAULT_FORMAL_DEPARTMENT,
+  DEFAULT_FORMAL_EVALUATOR,
+  DEFAULT_FORMAL_EVALUATOR_DEPARTMENT,
+  DEFAULT_FORMAL_EVALUATOR_POSITION
+} from '../utils/excelHelper';
 
 /**
  * 员工绩效行数据结构
@@ -111,14 +118,28 @@ watch(
   { deep: true }
 );
 
-// 3. 上传的 Excel 模板状态
+/** 预置默认模板路径与名称常量 */
+export const DEFAULT_TEMPLATE_NAME = '正式员工绩效表单套表-JX1.7.xlsx';
+export const DEFAULT_TEMPLATE_PATH = '/正式员工绩效表单套表-JX1.7.xlsx';
+
+/** 绩效质量标准库路径与名称常量 */
+export const DEFAULT_STANDARDS_NAME = '绩效质量标准库.xlsx';
+export const DEFAULT_STANDARDS_PATH = '/绩效质量标准库.xlsx';
+
+// 3. 上传或预置的 Excel 模板状态
 export const excelTemplate = reactive<{
   fileName: string;
   buffer: ArrayBuffer | null;
+  isCustom: boolean;
 }>({
   fileName: '',
   buffer: null,
+  isCustom: false,
 });
+
+// 3.1 绩效质量标准库状态
+export const qualityStandards = ref<QualityStandardItem[]>([]);
+export const qualityStandardsLoaded = ref<boolean>(false);
 
 // 4. 员工列表数据
 export const employees = ref<EmployeeRow[]>([]);
@@ -189,10 +210,20 @@ export function resetGenerationStatus(): void {
 export interface FormalEmployeeRow {
   /** 唯一标识 */
   id: string;
+  /** 所属公司 (回写到 D2) */
+  company?: string;
   /** 员工姓名 (回写到 D3) */
   name: string;
+  /** 所属部门 (回写到 H3) */
+  department?: string;
   /** 岗位名称 (回写到 L3) */
   position: string;
+  /** 考核人姓名 (回写到 D4) */
+  evaluator?: string;
+  /** 考核人所属部门 (回写到 H4) */
+  evaluatorDepartment?: string;
+  /** 考核人岗位 (回写到 L4) */
+  evaluatorPosition?: string;
   /** 上个月绩效回顾 */
   lastMonthPerformance: string;
   /** 本月工作内容计划 */
@@ -234,13 +265,18 @@ watch(
 );
 
 /**
- * 添加一位空白的正式员工
+ * 添加一位空白的正式员工（预置图示标准固定的公司、部门、考核人及岗位信息）
  */
 export function addFormalEmployee(): void {
   formalEmployees.value.push({
     id: crypto.randomUUID(),
-    name: '新员工',
+    company: DEFAULT_FORMAL_COMPANY,
+    name: '杨祝翔',
+    department: DEFAULT_FORMAL_DEPARTMENT,
     position: 'APP开发工程师',
+    evaluator: DEFAULT_FORMAL_EVALUATOR,
+    evaluatorDepartment: DEFAULT_FORMAL_EVALUATOR_DEPARTMENT,
+    evaluatorPosition: DEFAULT_FORMAL_EVALUATOR_POSITION,
     lastMonthPerformance: '',
     thisMonthWorkContent: '',
     tasks: [],

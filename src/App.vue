@@ -39,7 +39,7 @@ const activeTab = ref<'formal' | 'generic'>('formal');
           @click="activeTab = 'formal'"
         >
           <FileSpreadsheet :size="16" />
-          <span>正式员工 JX1.6 专区</span>
+          <span>正式员工绩效专区</span>
         </button>
         <button 
           type="button" 
@@ -61,7 +61,7 @@ const activeTab = ref<'formal' | 'generic'>('formal');
       <SettingsPanel />
     </section>
 
-    <!-- 模式二：正式员工 JX1.6 套表专区 (默认激活) -->
+    <!-- 模式一：正式员工绩效套表专区 (默认激活) -->
     <template v-if="activeTab === 'formal'">
       <section class="step-section">
         <div class="step-badge">核心工作台</div>
