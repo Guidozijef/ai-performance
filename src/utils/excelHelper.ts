@@ -353,7 +353,7 @@ export async function writePerformanceToTemplate(
   if (stylesFile) {
     let stylesXml = await stylesFile.async('text');
     // 将 <fills> 区域内除索引 1 (gray125) 外的所有 patternFill 统一替换为 patternType="none"，彻底消除彩色与黄色背景
-    stylesXml = stylesXml.replace(/<fills[^>]*>([\s\S]*?)<\/fills>/, (match, inner) => {
+    stylesXml = stylesXml.replace(/<fills[^>]*>([\s\S]*?)<\/fills>/, (_match, inner) => {
       let count = 0;
       const cleanFills = inner.replace(/<fill>[\s\S]*?<\/fill>/g, () => {
         count++;
@@ -501,7 +501,7 @@ export async function writePerformanceToTemplate(
     // 将行 14 及以上的行号全部向后偏移 insertCount（先处理 mergeCell，再处理行）
     sheetXml = sheetXml.replace(
       /<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/g,
-      (match, c1, r1s, c2, r2s) => {
+      (_match, c1, r1s, c2, r2s) => {
         const r1 = parseInt(r1s, 10);
         const r2 = parseInt(r2s, 10);
         const nr1 = r1 >= 14 ? r1 + insertCount : r1;

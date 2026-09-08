@@ -1,0 +1,11 @@
+/**
+ * @fileoverview Cloudflare Pages 配置文件
+ * 定义项目名称、兼容日期以及静态构建产物输出目录。
+ * 遵循 Cloudflare 官方配置标准。
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-performance",
+  "compatibility_date": "2026-09-01",
+  "pages_build_output_dir": "dist"
+}
