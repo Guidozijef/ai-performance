@@ -5,19 +5,366 @@
  */
 
 import type { CellMapping, PerformanceTask, QualityStandardItem } from "./excelHelper";
+import type { LLMProvider } from "../store";
 
 /**
- * Gemini 客户端请求配置
+ * AI 客户端统一请求配置接口
  */
 export interface GeminiConfig {
+  /** 模型服务商类型（gemini | deepseek | qwen | openai | zhipu | custom） */
+  provider?: LLMProvider;
   /** API 密钥 */
   apiKey: string;
-  /** 备用 API 代理网关地址（例如 https://api.example.com ），若为空则使用官方域名 */
+  /** 接口基础 URL (Base URL) */
+  baseUrl?: string;
+  /** 备用 API 代理网关地址（保持向后兼容） */
   proxyUrl?: string;
-  /** 调用的模型名称，默认使用 gemini-1.5-flash */
+  /** 调用的模型名称 */
   model?: string;
   /** 全局系统提示词，用于设定 AI 的角色和整体考核基准 */
   systemInstruction?: string;
+}
+
+/**
+ * 将任意 Base URL 安全规范化解析为标准 /chat/completions 请求端点
+ *
+ * @param baseUrl 用户输入的 API 基础地址
+ * @returns 完整的 chat completions 请求 URL
+ */
+export function resolveChatCompletionsUrl(baseUrl: string): string {
+  let url = (baseUrl || '').trim().replace(/\/+$/, '');
+  if (!url) {
+    return 'https://api.openai.com/v1/chat/completions';
+  }
+  if (url.endsWith('/chat/completions')) {
+    return url;
+  }
+  if (url.endsWith('/v1') || url.includes('/v1/') || url.includes('/v1beta') || url.includes('/paas/v4')) {
+    return `${url}/chat/completions`;
+  }
+  return `${url}/v1/chat/completions`;
+}
+
+/**
+ * 将任意 Base URL 安全规范化解析为标准 /models 请求端点
+ *
+ * @param baseUrl 用户输入的 API 基础地址
+ * @returns 完整的 models 查询 URL
+ */
+export function resolveModelsUrl(baseUrl: string): string {
+  let url = (baseUrl || '').trim().replace(/\/+$/, '');
+  if (url.endsWith('/models')) {
+    return url;
+  }
+  if (url.endsWith('/chat/completions')) {
+    url = url.replace(/\/chat\/completions$/, '');
+  }
+  if (url.endsWith('/v1') || url.includes('/v1/') || url.includes('/v1beta') || url.includes('/paas/v4')) {
+    return `${url}/models`;
+  }
+  return `${url}/v1/models`;
+}
+
+/**
+ * 从大模型返回的原始文本中鲁棒解析提取 JSON 对象
+ * 兼容纯 JSON、Markdown 代码块（```json ... ```）、思考链及各类模型附带文字
+ *
+ * @param rawText 大模型返回的文本内容
+ * @returns 解析得到的 JavaScript 对象
+ */
+export function extractJsonFromResponse(rawText: string): any {
+  if (!rawText || typeof rawText !== 'string') {
+    throw new Error('模型未返回有效文本内容。');
+  }
+
+  const trimmed = rawText.trim();
+
+  // 1. 尝试直接 JSON.parse
+  try {
+    return JSON.parse(trimmed);
+  } catch (_) {}
+
+  // 2. 尝试提取包含在 ```json ... ``` 或 ``` ... ``` 中的代码块
+  const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeBlockMatch && codeBlockMatch[1]) {
+    try {
+      return JSON.parse(codeBlockMatch[1].trim());
+    } catch (_) {}
+  }
+
+  // 3. 尝试使用正则贪婪匹配最外层的 { ... }
+  const jsonObjectMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (jsonObjectMatch && jsonObjectMatch[0]) {
+    try {
+      return JSON.parse(jsonObjectMatch[0]);
+    } catch (_) {}
+  }
+
+  // 4. 尝试匹配最外层的 [ ... ]（如果是数组）
+  const jsonArrayMatch = trimmed.match(/\[[\s\S]*\]/);
+  if (jsonArrayMatch && jsonArrayMatch[0]) {
+    try {
+      return JSON.parse(jsonArrayMatch[0]);
+    } catch (_) {}
+  }
+
+  throw new Error(`未能从模型响应中提取出合法的 JSON 内容。原始返回：${trimmed.slice(0, 150)}...`);
+}
+
+/**
+ * 大模型网络请求调用选项接口
+ */
+export interface DispatchOptions {
+  /** 请求超时时间 (毫秒)，默认 60000ms (1 分钟) */
+  timeoutMs?: number;
+  /** 外部可传入的 AbortSignal，用于支持手动取消或中断旧请求 */
+  abortSignal?: AbortSignal;
+}
+
+/**
+ * 统一调度不同大模型协议请求（Gemini REST API vs OpenAI 兼容规范接口）
+ *
+ * @param config AI 配置参数
+ * @param prompt 提交给模型的最终提示词
+ * @param temperature 生成多样性/确定性温度系数
+ * @param options 调用选项（超时控制与中止信号）
+ * @returns Promise<string> 模型返回的文本内容
+ */
+export async function dispatchLLMRequest(
+  config: GeminiConfig,
+  prompt: string,
+  temperature: number = 0.4,
+  options?: DispatchOptions
+): Promise<string> {
+  const { apiKey, proxyUrl, baseUrl, provider = 'gemini', systemInstruction } = config;
+  const effectiveUrl = (baseUrl || proxyUrl || '').trim();
+  const isDirectGemini = provider === 'gemini' && (!effectiveUrl || effectiveUrl.includes('generativelanguage.googleapis.com'));
+  const model = config.model || (isDirectGemini ? 'gemini-2.5-flash' : 'gpt-4o');
+
+  // 初始化 AbortController 用于 60 秒超时控制与外部取消中断
+  const controller = new AbortController();
+  const timeoutMs = options?.timeoutMs ?? 60000;
+  let isTimedOut = false;
+
+  const timeoutId = setTimeout(() => {
+    isTimedOut = true;
+    controller.abort(new Error(`大模型请求超时（已超过 ${Math.round(timeoutMs / 1000)} 秒未响应），可能处于网络拥堵或高负荷状态，请点击重新推导。`));
+  }, timeoutMs);
+
+  // 监听外部传递的中止信号
+  if (options?.abortSignal) {
+    if (options.abortSignal.aborted) {
+      clearTimeout(timeoutId);
+      throw new Error('操作已取消。');
+    }
+    options.abortSignal.addEventListener('abort', () => {
+      clearTimeout(timeoutId);
+      controller.abort(options.abortSignal?.reason || new Error('用户已手动终止本次推导。'));
+    });
+  }
+
+  let requestUrl = '';
+  let payload: any = {};
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (isDirectGemini) {
+    // 官方直连 Gemini 原生 REST 接口
+    requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    payload = {
+      contents: [
+        {
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature,
+      },
+      ...(systemInstruction?.trim()
+        ? {
+            systemInstruction: {
+              parts: [{ text: systemInstruction }],
+            },
+          }
+        : {}),
+    };
+  } else {
+    // OpenAI 兼容协议（支持 ChatGPT、DeepSeek、通义千问、智谱、自定义网关等）
+    const fallbackBase =
+      provider === 'deepseek'
+        ? 'https://api.deepseek.com/v1'
+        : provider === 'qwen'
+        ? 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+        : provider === 'zhipu'
+        ? 'https://open.bigmodel.cn/api/paas/v4'
+        : 'https://api.openai.com/v1';
+
+    requestUrl = resolveChatCompletionsUrl(effectiveUrl || fallbackBase);
+    headers['Authorization'] = `Bearer ${apiKey}`;
+
+    // 在本地开发环境下，通过 Vite 动态代理规避代理服务可能包含的 CORS 限制
+    if (import.meta.env.DEV) {
+      try {
+        const urlObj = new URL(requestUrl);
+        const origin = urlObj.origin;
+        const pathname = urlObj.pathname.replace(/\/$/, '');
+        requestUrl = `/cors-proxy${pathname}`.replace(/\/+/g, '/');
+        headers['X-Target-Url'] = origin;
+      } catch (e) {
+        console.warn('CORS Proxy URL 解析失败，降级直连:', e);
+        const originalUrl = requestUrl;
+        requestUrl = '/cors-proxy';
+        headers['X-Target-Url'] = originalUrl;
+      }
+    }
+
+    payload = {
+      model,
+      messages: [
+        ...(systemInstruction?.trim() ? [{ role: 'system', content: systemInstruction }] : []),
+        { role: 'user', content: prompt },
+      ],
+      temperature,
+    };
+  }
+
+  try {
+    const response = await fetch(requestUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP 错误！状态码: ${response.status}, 详情: ${errorText}`);
+    }
+
+    const resData = await response.json();
+    let generatedText = '';
+
+    if (isDirectGemini) {
+      generatedText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+    } else {
+      generatedText = resData.choices?.[0]?.message?.content;
+    }
+
+    if (!generatedText) {
+      throw new Error('模型未返回有效的内容。');
+    }
+
+    return generatedText;
+  } catch (error: any) {
+    if (isTimedOut || controller.signal.aborted || error.name === 'AbortError') {
+      const abortReason = controller.signal.reason?.message || error.message;
+      throw new Error(abortReason || `请求超时（超过 ${Math.round(timeoutMs / 1000)} 秒），请点击重新推导。`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * 依据大模型提供商规范自适应拉取可用模型列表
+ *
+ * @param config AI 配置参数
+ * @returns Promise<string[]> 可用模型列表
+ */
+export async function fetchAvailableModels(config: GeminiConfig): Promise<string[]> {
+  const { apiKey, proxyUrl, baseUrl, provider = 'gemini' } = config;
+  const effectiveUrl = (baseUrl || proxyUrl || '').trim();
+  const isDirectGemini = provider === 'gemini' && (!effectiveUrl || effectiveUrl.includes('generativelanguage.googleapis.com'));
+
+  let targetUrl = '';
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (isDirectGemini) {
+    targetUrl = `https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`;
+  } else {
+    const fallbackBase =
+      provider === 'deepseek'
+        ? 'https://api.deepseek.com/v1'
+        : provider === 'qwen'
+        ? 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+        : provider === 'zhipu'
+        ? 'https://open.bigmodel.cn/api/paas/v4'
+        : 'https://api.openai.com/v1';
+
+    targetUrl = resolveModelsUrl(effectiveUrl || fallbackBase);
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+  }
+
+  // Vite 开发服务器动态代理转发
+  if (import.meta.env.DEV && !isDirectGemini) {
+    try {
+      const urlObj = new URL(targetUrl);
+      const origin = urlObj.origin;
+      const pathname = urlObj.pathname.replace(/\/$/, '');
+      targetUrl = `/cors-proxy${pathname}`.replace(/\/+/g, '/');
+      headers['X-Target-Url'] = origin;
+    } catch (e) {
+      console.warn('CORS Proxy URL 解析失败，降级直连:', e);
+      const originalUrl = targetUrl;
+      targetUrl = '/cors-proxy';
+      headers['X-Target-Url'] = originalUrl;
+    }
+  }
+
+  const response = await fetch(targetUrl, {
+    method: 'GET',
+    headers,
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`HTTP 异常 ${response.status}: ${errText || '未知错误'}`);
+  }
+
+  const resData = await response.json();
+  let models: string[] = [];
+
+  if (isDirectGemini) {
+    if (resData && Array.isArray(resData.models)) {
+      models = resData.models
+        .map((m: any) => (m.name ? m.name.replace(/^models\//, '') : ''))
+        .filter((id: string) => id && (id.startsWith('gemini-') || id.startsWith('learn-')))
+        .sort();
+    } else {
+      throw new Error('返回的 JSON 结构不符合 Gemini 官方 models 列表格式。');
+    }
+  } else {
+    if (resData && Array.isArray(resData.data)) {
+      models = resData.data
+        .map((m: any) => m.id)
+        .filter((id: any) => typeof id === 'string')
+        .sort();
+    } else if (resData && Array.isArray(resData.models)) {
+      models = resData.models
+        .map((m: any) => m.id || m.name)
+        .filter((id: any) => typeof id === 'string')
+        .sort();
+    } else {
+      throw new Error('返回的响应结构中缺少 data 或 models 数组。');
+    }
+  }
+
+  if (models.length === 0) {
+    throw new Error('未能在返回列表中解析出任何合法的模型标识符。');
+  }
+
+  return models;
 }
 
 /**
@@ -33,20 +380,23 @@ export interface AIGeneratedResult {
 }
 
 /**
- * 调用 Gemini API 生成单个员工的绩效字段内容
+ * 调用大模型 API 生成单个员工的绩效字段内容
  *
- * @param config Gemini API 客户端配置
+ * @param config AI 客户端配置
  * @param employeeInput 员工基本数据及工作描述（键值对）
  * @param aiMappings 需要 AI 生成的单元格映射列表
  * @returns Promise<AIGeneratedResult> 返回生成的单元格数据对象
  */
-export async function generateEmployeePerformance(config: GeminiConfig, employeeInput: Record<string, string | number>, aiMappings: CellMapping[]): Promise<AIGeneratedResult> {
-  const { apiKey, proxyUrl, model = "gemini-1.5-flash", systemInstruction } = config;
-
-  if (!apiKey) {
+export async function generateEmployeePerformance(
+  config: GeminiConfig,
+  employeeInput: Record<string, string | number>,
+  aiMappings: CellMapping[],
+  options?: DispatchOptions
+): Promise<AIGeneratedResult> {
+  if (!config.apiKey) {
     return {
       cellData: {},
-      message: "未配置 API Key，请先在设置中填写 Gemini API Key。",
+      message: '未配置 API Key，请先在系统设置中填写 API Key。',
       success: false,
     };
   }
@@ -54,7 +404,7 @@ export async function generateEmployeePerformance(config: GeminiConfig, employee
   if (aiMappings.length === 0) {
     return {
       cellData: {},
-      message: "未配置任何需要 AI 生成的单元格映射。",
+      message: '未配置任何需要 AI 生成的单元格映射。',
       success: false,
     };
   }
@@ -62,9 +412,11 @@ export async function generateEmployeePerformance(config: GeminiConfig, employee
   // 1. 构建 Prompt，明确告知模型输出格式及字段要求
   const inputDataStr = Object.entries(employeeInput)
     .map(([key, val]) => `- ${key}: ${val}`)
-    .join("\n");
+    .join('\n');
 
-  const fieldsDemandStr = aiMappings.map((m) => `- 单元格 [${m.cellRef}] (期望生成的内容: ${m.label}): ${m.aiInstruction || "请结合员工表现生成合适的内容"}`).join("\n");
+  const fieldsDemandStr = aiMappings
+    .map((m) => `- 单元格 [${m.cellRef}] (期望生成的内容: ${m.label}): ${m.aiInstruction || '请结合员工表现生成合适的内容'}`)
+    .join('\n');
 
   const prompt = `
 你是一个专业的 HR 绩效考评专家。请根据以下员工的基础信息及工作表现，生成对应的绩效考核内容。
@@ -83,106 +435,9 @@ ${fieldsDemandStr}
 5. 仅返回 JSON 字符串本身，严禁在 JSON 前后包裹任何 Markdown 标记（例如 \`\`\`json ... \`\`\`），以确保代码能够直接进行 JSON.parse 解析。
 `;
 
-  // 2. 双轨协议选择：官方直连使用 Gemini 原生 API（避免 CORS 跨域拦截），代理使用 OpenAI 协议
-  const isDirectGemini = !proxyUrl || proxyUrl.trim().includes("generativelanguage.googleapis.com");
-
-  let requestUrl = "";
-  let payload: any = {};
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-
-  if (isDirectGemini) {
-    // 直连官方：使用原生 REST 接口（已由谷歌开启 CORS 许可）
-    requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    payload = {
-      contents: [
-        {
-          parts: [
-            {
-              text: prompt,
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.7,
-      },
-      ...(systemInstruction?.trim()
-        ? {
-            systemInstruction: {
-              parts: [{ text: systemInstruction }],
-            },
-          }
-        : {}),
-    };
-  } else {
-    // 代理网关：采用标准 OpenAI chat/completions 与 Bearer Auth
-    let baseUrl = proxyUrl.trim().replace(/\/$/, "");
-    if (baseUrl.endsWith("/v1") || baseUrl.includes("/v1/") || baseUrl.includes("/v1beta")) {
-      requestUrl = `${baseUrl}/chat/completions`;
-    } else {
-      requestUrl = `${baseUrl}/v1/chat/completions`;
-    }
-    headers["Authorization"] = `Bearer ${apiKey}`;
-
-    // 在本地开发环境下，通过 Vite 动态代理规避代理服务可能包含的 CORS 限制
-    if (import.meta.env.DEV) {
-      try {
-        const urlObj = new URL(requestUrl);
-        const origin = urlObj.origin;
-        const pathname = urlObj.pathname.replace(/\/$/, "");
-        requestUrl = `/cors-proxy${pathname}`.replace(/\/+/g, "/");
-        headers["X-Target-Url"] = origin;
-      } catch (e) {
-        // 降级处理：若 URL 解析失败，保留原路径直接发起请求
-        console.warn("CORS Proxy URL 解析失败，降级直连:", e);
-        const originalUrl = requestUrl;
-        requestUrl = "/cors-proxy";
-        headers["X-Target-Url"] = originalUrl;
-      }
-    }
-
-    payload = {
-      model,
-      messages: [...(systemInstruction?.trim() ? [{ role: "system", content: systemInstruction }] : []), { role: "user", content: prompt }],
-      temperature: 0.7,
-    };
-  }
-
   try {
-    const response = await fetch(requestUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`HTTP 错误！状态码: ${response.status}, 详情: ${errorText}`);
-    }
-
-    const resData = await response.json();
-    let generatedText = "";
-
-    if (isDirectGemini) {
-      generatedText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
-    } else {
-      generatedText = resData.choices?.[0]?.message?.content;
-    }
-
-    if (!generatedText) {
-      throw new Error("模型未返回有效的内容。");
-    }
-
-    // 4. 解析返回的 JSON 数据
-    const cleanText = generatedText
-      .trim()
-      .replace(/^```json/, "")
-      .replace(/```$/, "")
-      .trim();
-    const cellData = JSON.parse(cleanText) as Record<string, string | number>;
+    const generatedText = await dispatchLLMRequest(config, prompt, 0.7, options);
+    const cellData = extractJsonFromResponse(generatedText) as Record<string, string | number>;
 
     // 校验返回的数据是否包含我们需要的单元格
     const validatedData: Record<string, string | number> = {};
@@ -191,8 +446,7 @@ ${fieldsDemandStr}
       if (ref in cellData) {
         validatedData[ref] = cellData[ref];
       } else {
-        // 若 AI 遗漏了某个字段，给予默认提示或空白
-        validatedData[ref] = "";
+        validatedData[ref] = '';
       }
     }
 
@@ -201,10 +455,10 @@ ${fieldsDemandStr}
       success: true,
     };
   } catch (error: any) {
-    console.error("API 调用异常:", error);
+    console.error('API 调用异常:', error);
     return {
       cellData: {},
-      message: error.message || "调用 API 时发生未知错误。",
+      message: error.message || '调用 API 时发生未知错误。',
       success: false,
     };
   }
@@ -239,17 +493,16 @@ export async function generateFormalPerformance(
   lastMonthPerformance: string,
   thisMonthWorkContent: string,
   targetMonth: string, // 考核月份，格式为 YYYY-MM
-  standards: QualityStandardItem[] = [] // 绩效质量标准库条目列表
+  standards: QualityStandardItem[] = [], // 绩效质量标准库条目列表
+  options?: DispatchOptions
 ): Promise<FormalPerformanceResult> {
-  const { apiKey, proxyUrl, model = "gemini-1.5-flash", systemInstruction } = config;
-
-  if (!apiKey) {
+  if (!config.apiKey) {
     return {
       name,
       position,
       tasks: [],
       success: false,
-      message: "未配置 API Key，请先在设置中填写 Gemini API Key。",
+      message: "未配置 API Key，请先在系统设置中填写 API Key。",
     };
   }
 
@@ -379,105 +632,9 @@ JSON 结构样例：
 }
 `;
 
-  // 3. 双轨协议选择：官方直连使用 Gemini 原生 API（避免 CORS 跨域拦截），代理使用 OpenAI 协议
-  const isDirectGemini = !proxyUrl || proxyUrl.trim().includes("generativelanguage.googleapis.com");
-
-  let requestUrl = "";
-  let payload: any = {};
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-
-  if (isDirectGemini) {
-    // 直连官方：使用原生 REST 接口（已由谷歌开启 CORS 许可）
-    requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    payload = {
-      contents: [
-        {
-          parts: [
-            {
-              text: prompt,
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.4,
-      },
-      ...(systemInstruction?.trim()
-        ? {
-            systemInstruction: {
-              parts: [{ text: systemInstruction }],
-            },
-          }
-        : {}),
-    };
-  } else {
-    // 代理网关：采用标准 OpenAI chat/completions 与 Bearer Auth
-    let baseUrl = proxyUrl.trim().replace(/\/$/, "");
-    if (baseUrl.endsWith("/v1") || baseUrl.includes("/v1/") || baseUrl.includes("/v1beta")) {
-      requestUrl = `${baseUrl}/chat/completions`;
-    } else {
-      requestUrl = `${baseUrl}/v1/chat/completions`;
-    }
-    headers["Authorization"] = `Bearer ${apiKey}`;
-
-    // 在本地开发环境下，通过 Vite 动态代理规避代理服务可能包含的 CORS 限制
-    if (import.meta.env.DEV) {
-      try {
-        const urlObj = new URL(requestUrl);
-        const origin = urlObj.origin;
-        const pathname = urlObj.pathname.replace(/\/$/, "");
-        requestUrl = `/cors-proxy${pathname}`.replace(/\/+/g, "/");
-        headers["X-Target-Url"] = origin;
-      } catch (e) {
-        // 降级处理：若 URL 解析失败，保留原路径直接发起请求
-        console.warn("CORS Proxy URL 解析失败，降级直连:", e);
-        const originalUrl = requestUrl;
-        requestUrl = "/cors-proxy";
-        headers["X-Target-Url"] = originalUrl;
-      }
-    }
-
-    payload = {
-      model,
-      messages: [...(systemInstruction?.trim() ? [{ role: "system", content: systemInstruction }] : []), { role: "user", content: prompt }],
-      temperature: 0.4,
-    };
-  }
-
   try {
-    const response = await fetch(requestUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`HTTP 错误！状态码: ${response.status}, 详情: ${errorText}`);
-    }
-
-    const resData = await response.json();
-    let generatedText = "";
-
-    if (isDirectGemini) {
-      generatedText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
-    } else {
-      generatedText = resData.choices?.[0]?.message?.content;
-    }
-
-    if (!generatedText) {
-      throw new Error("模型未返回有效的内容。");
-    }
-
-    const cleanText = generatedText
-      .trim()
-      .replace(/^```json/, "")
-      .replace(/```$/, "")
-      .trim();
-    const parsedData = JSON.parse(cleanText);
+    const generatedText = await dispatchLLMRequest(config, prompt, 0.4, options);
+    const parsedData = extractJsonFromResponse(generatedText);
 
     let tasks: PerformanceTask[] = parsedData.tasks || [];
 

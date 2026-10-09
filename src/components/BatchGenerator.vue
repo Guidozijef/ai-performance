@@ -59,7 +59,7 @@ const validationError = computed(() => {
     return '请先在上方上传您的 Excel 绩效模板。';
   }
   if (!geminiConfig.apiKey) {
-    return '请先在设置中填写 Gemini API Key。';
+    return '请先在上方设置中填写 API Key。';
   }
   if (employees.value.length === 0) {
     return '请添加至少一名员工的数据。';
@@ -123,16 +123,19 @@ async function generateSingle(row: EmployeeRow) {
     inputContext[m.label] = row.inputs[m.cellRef] || '';
   });
 
-  // 2. 调用 Gemini API 生成内容
+  // 2. 调用大模型 API 生成内容（增加 60 秒超时控制）
   const result = await generateEmployeePerformance(
     {
+      provider: geminiConfig.provider,
       apiKey: geminiConfig.apiKey,
+      baseUrl: geminiConfig.baseUrl,
       proxyUrl: geminiConfig.proxyUrl,
       model: geminiConfig.model,
       systemInstruction: geminiConfig.systemInstruction
     },
     inputContext,
-    aiMappings.value
+    aiMappings.value,
+    { timeoutMs: 60000 }
   );
 
   // 3. 处理生成结果
@@ -305,6 +308,16 @@ function downloadAll() {
                 <div class="row-actions-group">
                   <button
                     type="button"
+                    class="action-btn retry-btn"
+                    v-if="emp.status === 'error'"
+                    @click="generateSingle(emp)"
+                    title="推导失败，点击重新推导此员工"
+                    :disabled="isGeneratingBatch"
+                  >
+                    <RefreshCw :size="16" />
+                  </button>
+                  <button
+                    type="button"
                     class="action-btn download-btn"
                     :disabled="emp.status !== 'success'"
                     @click="downloadSingle(emp)"
@@ -362,6 +375,16 @@ function downloadAll() {
           >
             <RefreshCw :size="16" />
             <span>重置状态</span>
+          </button>
+          <button 
+            type="button" 
+            class="btn btn-outline text-warning" 
+            v-if="employees.some(e => e.status === 'error')"
+            @click="generateAll" 
+            :disabled="isGeneratingBatch"
+          >
+            <RefreshCw :size="16" />
+            <span>重新推导失败项 ({{ employees.filter(e => e.status === 'error').length }})</span>
           </button>
           <button
             v-if="employees.filter(e => e.status === 'success').length > 0"

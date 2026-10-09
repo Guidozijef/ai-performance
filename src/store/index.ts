@@ -77,15 +77,149 @@ watch(
   { deep: true }
 );
 
+/** 支持的主流大模型服务商标识 */
+export type LLMProvider = 'gemini' | 'deepseek' | 'qwen' | 'openai' | 'zhipu' | 'custom';
+
+/**
+ * 服务商预置配置项定义
+ */
+export interface ProviderPreset {
+  id: LLMProvider;
+  name: string;
+  badge: string;
+  defaultBaseUrl: string;
+  defaultModel: string;
+  presetModels: string[];
+  keyPlaceholder: string;
+  keyHelpText: string;
+  keyUrl: string;
+  isDirectGemini?: boolean;
+}
+
+/**
+ * 常见主流大模型预置字典
+ */
+export const LLM_PROVIDERS: Record<LLMProvider, ProviderPreset> = {
+  gemini: {
+    id: 'gemini',
+    name: 'Google Gemini',
+    badge: '官方直连',
+    defaultBaseUrl: 'https://generativelanguage.googleapis.com',
+    defaultModel: 'gemini-2.5-flash',
+    presetModels: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'],
+    keyPlaceholder: 'AIzaSy...',
+    keyHelpText: '支持浏览器直连免跨域，获取 API Key：',
+    keyUrl: 'https://aistudio.google.com/app/apikey',
+    isDirectGemini: true,
+  },
+  deepseek: {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    badge: '深度求索',
+    defaultBaseUrl: 'https://api.deepseek.com/v1',
+    defaultModel: 'deepseek-chat',
+    presetModels: ['deepseek-chat', 'deepseek-reasoner'],
+    keyPlaceholder: 'sk-...',
+    keyHelpText: '支持 DeepSeek-V3 与 R1 深度思考推理，获取 API Key：',
+    keyUrl: 'https://platform.deepseek.com/api_keys',
+  },
+  qwen: {
+    id: 'qwen',
+    name: '通义千问',
+    badge: '阿里百炼',
+    defaultBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    defaultModel: 'qwen-plus',
+    presetModels: ['qwen-plus', 'qwen-turbo', 'qwen-max', 'qwen-long', 'qwen2.5-72b-instruct'],
+    keyPlaceholder: 'sk-...',
+    keyHelpText: '阿里云百炼兼容模式，获取 API Key：',
+    keyUrl: 'https://bailian.console.aliyun.com/',
+  },
+  openai: {
+    id: 'openai',
+    name: 'ChatGPT',
+    badge: 'OpenAI',
+    defaultBaseUrl: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o',
+    presetModels: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.5-preview', 'o3-mini', 'gpt-4-turbo'],
+    keyPlaceholder: 'sk-...',
+    keyHelpText: '官方 OpenAI 或第三方反代网关，获取 API Key：',
+    keyUrl: 'https://platform.openai.com/api-keys',
+  },
+  zhipu: {
+    id: 'zhipu',
+    name: '智谱 AI',
+    badge: 'GLM大模型',
+    defaultBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    defaultModel: 'glm-4-flash',
+    presetModels: ['glm-4-flash', 'glm-4-plus', 'glm-4-air', 'glm-4'],
+    keyPlaceholder: '请输入智谱 API Key',
+    keyHelpText: 'glm-4-flash 高性价比推荐，获取 API Key：',
+    keyUrl: 'https://bigmodel.cn/usercenter/apikeys',
+  },
+  custom: {
+    id: 'custom',
+    name: '自定义大模型',
+    badge: '自定义 URL',
+    defaultBaseUrl: '',
+    defaultModel: '',
+    presetModels: [],
+    keyPlaceholder: '请输入 API Key（可为空）',
+    keyHelpText: '支持 OneAPI、NewAPI、Ollama、vLLM 或私有部署端点',
+    keyUrl: '',
+  },
+};
+
+/**
+ * 全局 AI 配置数据接口
+ */
+export interface AIConfig {
+  /** 当前选中的服务商类型 */
+  provider: LLMProvider;
+  /** 当前 API 密钥 */
+  apiKey: string;
+  /** 接口基础 URL (Base URL) */
+  baseUrl: string;
+  /** 备用/代理网关地址（保持与 baseUrl 互通，向后兼容） */
+  proxyUrl: string;
+  /** 调用的模型名称 */
+  model: string;
+  /** 全局系统提示词 */
+  systemInstruction: string;
+  /** 针对各服务商独立记忆保存的 API Key 映射字典 */
+  providerKeys: Record<string, string>;
+  /** 针对各服务商独立记忆保存的 Base URL 映射字典 */
+  providerUrls: Record<string, string>;
+}
+
 // 1. API 配置状态（从 localStorage 初始化或使用默认值）
-const savedConfig = localStorage.getItem(STORAGE_KEYS.GEMINI_CONFIG);
-export const geminiConfig = reactive({
-  apiKey: '',
-  proxyUrl: '',
-  model: 'gemini-2.5-flash',
-  systemInstruction: '你是一个专业、严谨且富有建设性眼光的企业HR绩效评定官。请基于员工的工作汇报，产出符合规范的评分与总结。',
-  ...(savedConfig ? JSON.parse(savedConfig) : {}),
+const savedConfigRaw = localStorage.getItem(STORAGE_KEYS.GEMINI_CONFIG);
+let parsedConfig: Partial<AIConfig> = {};
+if (savedConfigRaw) {
+  try {
+    parsedConfig = JSON.parse(savedConfigRaw);
+  } catch (e) {
+    console.error('解析已保存的 API 配置失败:', e);
+  }
+}
+
+const initialProvider: LLMProvider = (parsedConfig.provider as LLMProvider) || 'gemini';
+const defaultPreset = LLM_PROVIDERS[initialProvider] || LLM_PROVIDERS.gemini;
+
+export const geminiConfig = reactive<AIConfig>({
+  provider: initialProvider,
+  apiKey: parsedConfig.apiKey || '',
+  baseUrl: parsedConfig.baseUrl || parsedConfig.proxyUrl || defaultPreset.defaultBaseUrl,
+  proxyUrl: parsedConfig.proxyUrl || parsedConfig.baseUrl || defaultPreset.defaultBaseUrl,
+  model: parsedConfig.model || defaultPreset.defaultModel,
+  systemInstruction:
+    parsedConfig.systemInstruction ||
+    '你是一个专业、严谨且富有建设性眼光的企业HR绩效评定官。请基于员工的工作汇报，产出符合规范的评分与总结。',
+  providerKeys: parsedConfig.providerKeys || {},
+  providerUrls: parsedConfig.providerUrls || {},
 });
+
+// 向后兼容别名
+export const aiConfig = geminiConfig;
 
 // 监听 API 配置变化并持久化
 watch(

@@ -12,7 +12,7 @@ import type { FormalEmployeeRow } from "../store";
 import { generateFormalPerformance } from "../utils/geminiHelper";
 import { writePerformanceToTemplate, downloadExcelFile, readPerformanceFromExcel, parseQualityStandards } from "../utils/excelHelper";
 import type { PerformanceTask } from "../utils/excelHelper";
-import { Users, Trash2, Sparkles, Download, AlertTriangle, FileSpreadsheet, RefreshCw, Upload, Plus } from "lucide-vue-next";
+import { Users, Trash2, Sparkles, Download, AlertTriangle, FileSpreadsheet, RefreshCw, Upload, Plus, XCircle, RotateCcw } from "lucide-vue-next";
 
 // 记录当前正在编辑任务的员工 ID
 const activeEmpId = ref<string | null>(null);
@@ -20,6 +20,12 @@ const activeEmpId = ref<string | null>(null);
 const isGeneratingBatch = ref(false);
 // 加载提示
 const templateLoadingStatus = ref("");
+
+// 当前活跃的推导中止控制器（用于支持随时取消与中断重试）
+let activeAbortController: AbortController | null = null;
+// 已生成耗时秒数（用于倒计时与超时拦截感知）
+const generatingElapsedSeconds = ref(0);
+let elapsedTimerId: any = null;
 
 // 计算当前选中的正在编辑绩效计划的员工
 const activeEmployee = computed(() => {
@@ -32,7 +38,7 @@ const validationError = computed(() => {
     return "未加载 Excel 模板，请确保 public 下存在模板或上传新模板。";
   }
   if (!geminiConfig.apiKey) {
-    return "请先在设置中填写 Gemini API Key。";
+    return "请先在上方设置中填写 API Key。";
   }
   if (formalEmployees.value.length === 0) {
     return "请至少添加一名正式员工。";
@@ -191,43 +197,97 @@ async function updateExcelBuffer(emp: FormalEmployeeRow): Promise<boolean> {
 }
 
 /**
- * 单个生成逻辑
+ * 单个员工绩效智能生成逻辑（支持 60 秒超时与自动/手动重试）
  */
 async function generateSingle(emp: FormalEmployeeRow) {
   if (!geminiConfig.apiKey) return;
+
+  // 1. 若存在未结束的前序请求，先行中断，防止并发冲突
+  if (activeAbortController) {
+    activeAbortController.abort(new Error('用户重新发起了推导，已终止前序请求。'));
+    activeAbortController = null;
+  }
+
+  // 2. 初始化中止控制器与计时器
+  activeAbortController = new AbortController();
+  const currentSignal = activeAbortController.signal;
+
+  clearInterval(elapsedTimerId);
+  generatingElapsedSeconds.value = 0;
+  elapsedTimerId = setInterval(() => {
+    generatingElapsedSeconds.value += 1;
+  }, 1000);
+
   emp.status = "generating";
   emp.errorMessage = undefined;
   emp.tasks = [];
 
-  const result = await generateFormalPerformance(
-    {
-      apiKey: geminiConfig.apiKey,
-      proxyUrl: geminiConfig.proxyUrl,
-      model: geminiConfig.model,
-      systemInstruction: geminiConfig.systemInstruction,
-    },
-    emp.name,
-    emp.position,
-    emp.lastMonthPerformance,
-    emp.thisMonthWorkContent,
-    performanceMonth.value,
-    qualityStandards.value, // 注入绩效质量标准库
-  );
+  try {
+    const result = await generateFormalPerformance(
+      {
+        provider: geminiConfig.provider,
+        apiKey: geminiConfig.apiKey,
+        baseUrl: geminiConfig.baseUrl,
+        proxyUrl: geminiConfig.proxyUrl,
+        model: geminiConfig.model,
+        systemInstruction: geminiConfig.systemInstruction,
+      },
+      emp.name,
+      emp.position,
+      emp.lastMonthPerformance,
+      emp.thisMonthWorkContent,
+      performanceMonth.value,
+      qualityStandards.value, // 注入绩效质量标准库
+      {
+        timeoutMs: 60000,
+        abortSignal: currentSignal,
+      }
+    );
 
-  if (result.success) {
-    emp.tasks = result.tasks;
-    emp.name = result.name;
-    emp.position = result.position;
+    if (result.success) {
+      emp.tasks = result.tasks;
+      emp.name = result.name;
+      emp.position = result.position;
 
-    // 渲染回写并清除红色背景
-    const successWrite = await updateExcelBuffer(emp);
-    if (successWrite) {
-      emp.status = "success";
+      // 渲染回写并清除红色背景
+      const successWrite = await updateExcelBuffer(emp);
+      if (successWrite) {
+        emp.status = "success";
+      }
+    } else {
+      emp.errorMessage = result.message || "推导失败，请点击重新推导。";
+      emp.status = "error";
     }
-  } else {
-    emp.errorMessage = result.message;
+  } catch (err: any) {
+    console.error("生成异常:", err);
+    emp.errorMessage = err.message || "大模型响应超时（超过 1 分钟）或网络异常，请点击重新推导。";
     emp.status = "error";
+  } finally {
+    clearInterval(elapsedTimerId);
+    activeAbortController = null;
   }
+}
+
+/**
+ * 手动取消当前正在生成的推导任务
+ */
+function cancelGeneration(emp: FormalEmployeeRow) {
+  if (activeAbortController) {
+    activeAbortController.abort(new Error('用户已手动取消该次推导。'));
+    activeAbortController = null;
+  }
+  clearInterval(elapsedTimerId);
+  generatingElapsedSeconds.value = 0;
+  emp.status = "idle";
+  emp.errorMessage = "已取消本次推导，您可以调整工作内容或配置后重新开始。";
+}
+
+/**
+ * 取消当前并立即重新发起推导
+ */
+function cancelAndRetry(emp: FormalEmployeeRow) {
+  cancelGeneration(emp);
+  generateSingle(emp);
 }
 
 /**
@@ -468,9 +528,36 @@ ${taskSummary}`;
 
         <!-- 控制按钮行 -->
         <div class="panel-actions">
-          <button type="button" class="btn btn-primary btn-lg" :disabled="!geminiConfig.apiKey || activeEmployee.status === 'generating' || isGeneratingBatch" @click="generateSingle(activeEmployee)">
-            <Sparkles :size="16" />
-            <span>{{ activeEmployee.status === "success" ? "重新智能推导本月绩效" : "开始智能推导本月绩效" }}</span>
+          <button
+            type="button"
+            class="btn btn-primary btn-lg"
+            :disabled="!geminiConfig.apiKey || isGeneratingBatch"
+            @click="activeEmployee.status === 'generating' ? cancelAndRetry(activeEmployee) : generateSingle(activeEmployee)"
+          >
+            <RefreshCw v-if="activeEmployee.status === 'generating'" :size="16" class="animate-spin" />
+            <RotateCcw v-else-if="activeEmployee.status === 'error'" :size="16" />
+            <Sparkles v-else :size="16" />
+            <span>
+              {{ activeEmployee.status === "generating"
+                ? `推导进行中 (${generatingElapsedSeconds}s)... 点击可重新推导`
+                : activeEmployee.status === "error"
+                ? "推导失败，点击重新推导"
+                : activeEmployee.status === "success"
+                ? "重新智能推导本月绩效"
+                : "开始智能推导本月绩效" }}
+            </span>
+          </button>
+
+          <!-- 正在生成时提供取消按钮 -->
+          <button
+            v-if="activeEmployee.status === 'generating'"
+            type="button"
+            class="btn btn-outline btn-lg text-danger"
+            @click="cancelGeneration(activeEmployee)"
+            title="中止当前正在等待的推导"
+          >
+            <XCircle :size="16" />
+            <span>取消推导</span>
           </button>
 
           <button type="button" class="btn btn-outline text-danger btn-lg" @click="handleRemoveActive" :disabled="isGeneratingBatch || formalEmployees.length <= 1">
@@ -630,16 +717,34 @@ ${taskSummary}`;
           <!-- 生成中 -->
           <div v-else-if="activeEmployee.status === 'generating'" class="grid-placeholder">
             <div class="spinner-large"></div>
-            <h3>绩效计划自动生成中，并排除主观文字...</h3>
-            <p>Gemini 正在严格审查质量目标及质量标准，以 1. 2. 3. 的客观量化指标呈现，请稍等数秒。</p>
+            <h3>绩效计划自动生成中，正在严密对齐量化标准...</h3>
+            <p>大模型正在严格匹配质量标准库，量化 1. 2. 3. 客观指标并自动平衡权重。</p>
+            <p class="generating-timer-tip">
+              ⏱️ 已等待 <strong>{{ generatingElapsedSeconds }}</strong> 秒（系统设置了 60 秒自动超时拦截，支持随时手动取消或重新推导）
+            </p>
+            <div style="margin-top: 18px; display: flex; gap: 12px; justify-content: center;">
+              <button type="button" class="btn btn-outline" @click="cancelGeneration(activeEmployee)">
+                <XCircle :size="16" />
+                <span>取消等待</span>
+              </button>
+              <button type="button" class="btn btn-primary" @click="cancelAndRetry(activeEmployee)">
+                <RefreshCw :size="16" />
+                <span>立即重新推导</span>
+              </button>
+            </div>
           </div>
 
           <!-- 出错状态 -->
           <div v-else-if="activeEmployee.status === 'error'" class="grid-placeholder error-box">
             <AlertTriangle :size="48" class="text-danger" />
-            <h3>推导失败</h3>
+            <h3>推导遇到问题</h3>
             <p class="text-danger-detail">{{ activeEmployee.errorMessage }}</p>
-            <button type="button" class="btn btn-primary" @click="generateSingle(activeEmployee)">重新生成</button>
+            <div style="margin-top: 18px; display: flex; gap: 12px; justify-content: center;">
+              <button type="button" class="btn btn-primary btn-lg" @click="generateSingle(activeEmployee)">
+                <RefreshCw :size="16" />
+                <span>重新推导绩效</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1507,5 +1612,27 @@ ${taskSummary}`;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.generating-timer-tip {
+  color: var(--accent);
+  font-size: 0.875rem;
+  margin-top: 6px;
+}
+
+.generating-timer-tip strong {
+  font-size: 1.15rem;
+  color: #f8fafc;
+  padding: 0 4px;
+}
+
+.btn-error-retry {
+  background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%) !important;
+  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.3) !important;
+}
+
+.btn-error-retry:hover {
+  background: linear-gradient(135deg, #fbbf24 0%, #f87171 100%) !important;
+  transform: translateY(-2px);
 }
 </style>

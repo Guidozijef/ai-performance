@@ -26,7 +26,7 @@ const activeTab = ref<'formal' | 'generic'>('formal');
         </div>
         <div class="logo-text">
           <h1>AI 智能员工绩效回写助手</h1>
-          <p>基于 Gemini 与 ExcelJS 的纯前端批量绩效生成与格式保留导出工具</p>
+          <p>支持 DeepSeek / Gemini / 通义千问 / ChatGPT / 智谱等多大模型，纯前端批量绩效生成与格式保留导出工具</p>
         </div>
       </div>
       
