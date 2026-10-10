@@ -186,25 +186,216 @@ export const DEFAULT_FORMAL_EVALUATOR_DEPARTMENT = "软件研发部";
 export const DEFAULT_FORMAL_EVALUATOR_POSITION = "软件研发部经理、主管";
 
 /**
- * 内部辅助：动态提取模板指定行中所有单元格的原始样式索引 (s 属性)
- * 使得后续任务行能够无损继承模板第一行的完整排版、字体、边框与对齐配置，
- * 绝不使用跨模板硬编码样式 ID。
+ * 任务样式解析结果接口
+ */
+interface TaskResolvedStyles {
+  /** 任务行居中对齐单元格样式索引（包含 10号黑色字体、全封闭细边框、居中、自动换行） */
+  centerStyleId: number;
+  /** 任务行居左对齐单元格样式索引（质量目标与质量标准专用，包含 10号黑色字体、全封闭细边框、居左、自动换行） */
+  leftStyleId: number;
+  /** 头部信息填写区域样式索引（包含 12号黑色常规字体、全封闭细边框、居中对齐） */
+  headerStyleId: number;
+  /** 若向 cellXfs 追加了新样式，返回更新后的 styles.xml 文本 */
+  newStylesXml?: string;
+}
+
+/**
+ * 内部辅助：动态解析并确保工作表中的工作考核项与头部信息样式。
+ * 针对用户上传的任意模板：
+ * 1. 严格筛选非红色、非彩色、10-11pt 的宋体黑色字体 (Regular，不加粗) 用于考核任务项；
+ * 2. 严格筛选非红色、12pt 的宋体黑色常规字体 (Regular，不加粗) 用于头部填写项（姓名、部门、岗位、考核人等）；
+ * 3. 严格筛选上、下、左、右四边均具备完整细边框（border style="thin"）的边框配置，根除缺右边框问题；
+ * 4. 分别精确定位垂直居中且开启自动换行 (wrapText) 的“居中对齐”与“居左对齐”样式；
+ * 5. 【关键架构防护】：严格限定在 <cellXfs> 作用域内解析，杜绝与外部 <cellStyleXfs> 混淆，
+ *    确保解析出的 styleId 与工作表中单元格的 s 属性 1:1 严格对齐；
+ * 6. 若模板缺失对应样式，则动态、无侵入地在 <cellXfs> 追加规范样式，保证极端情况下亦 100% 合规。
+ *
+ * @param stylesXml xl/styles.xml 原始文本
+ * @returns TaskResolvedStyles 包含解析出的居中样式 ID、居左样式 ID、头部12号字样式 ID 与可能更新的 styles.xml
+ */
+function resolveTaskStyles(stylesXml: string): TaskResolvedStyles {
+  const fonts = [...stylesXml.matchAll(/<font>([\s\S]*?)<\/font>/g)].map((m) => m[1]);
+  const borders = [...stylesXml.matchAll(/<border[^>]*>([\s\S]*?)<\/border>/g)].map((m) => m[1]);
+
+  // ★ 核心修复：仅提取 <cellXfs> 作用域内的单元格格式，绝不匹配外部的 <cellStyleXfs>
+  // Excel/WPS 中的单元格样式属性 s 严格对应 <cellXfs> 的 0-based 下标。若匹配到 <cellStyleXfs>，
+  // 会导致样式下标偏移（如偏移 49），使原本居左的样式错误指向百分比居中样式。
+  const cellXfsMatch = stylesXml.match(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/);
+  const cellXfsInner = cellXfsMatch ? cellXfsMatch[1] : "";
+  const cellXfs = [...cellXfsInner.matchAll(/<xf\s+([^>]+?)(?:\/>|>([\s\S]*?)<\/xf>)/gs)];
+
+  let centerStyleId = -1;
+  let leftStyleId = -1;
+  let headerStyleId = -1;
+
+  for (let i = 0; i < cellXfs.length; i++) {
+    const attrs = cellXfs[i][1];
+    const inner = cellXfs[i][2] || "";
+
+    const fontIdMatch = attrs.match(/fontId="(\d+)"/);
+    const borderIdMatch = attrs.match(/borderId="(\d+)"/);
+    if (!fontIdMatch || !borderIdMatch) continue;
+
+    const fontId = parseInt(fontIdMatch[1], 10);
+    const borderId = parseInt(borderIdMatch[1], 10);
+    const font = fonts[fontId] || "";
+    const border = borders[borderId] || "";
+
+    // 1. 字体颜色安全审计：严禁红色或醒目提示色（如 FFFF0000、FFC00000、FF9C0006 等），且常规内容必须不加粗
+    const isRed = font.includes("FFFF0000") || font.includes("FFC00000") || font.includes("FF9C0006");
+    const isBold = font.includes("<b/>") || font.includes("<b>");
+    if (isRed || isBold) continue;
+
+    // 2. 边框完整性审计：四边（left, right, top, bottom）必须均显式声明了 style 边框线，杜绝缺边框
+    const hasLeft = border.includes("<left style=");
+    const hasRight = border.includes("<right style=");
+    const hasTop = border.includes("<top style=");
+    const hasBottom = border.includes("<bottom style=");
+    if (!hasLeft || !hasRight || !hasTop || !hasBottom) continue;
+
+    // 3. 数字格式审计：优先匹配通用常规格式 (numFmtId="0")，避免误用百分比或特定日期格式
+    const isGeneralFmt = attrs.includes('numFmtId="0"');
+    if (!isGeneralFmt) continue;
+
+    // 4. 任务项基础排版审计：必须开启文字自动换行与垂直居中（任务项为 10号常规字）
+    const hasWrap = inner.includes('wrapText="1"');
+    const isVcenter = inner.includes('vertical="center"');
+    if (hasWrap && isVcenter) {
+      if (inner.includes('horizontal="center"')) {
+        if (centerStyleId === -1 || fontId === 19) {
+          centerStyleId = i;
+        }
+      }
+      if (inner.includes('horizontal="left"')) {
+        if (leftStyleId === -1 || fontId === 19) {
+          leftStyleId = i;
+        }
+      }
+    }
+
+    // 5. 头部填写项样式匹配（必须为 12号字，黑色宋体常规不加粗，居中对齐）
+    const isSz12 = font.includes('sz val="12"') || font.includes('sz val="12.0"');
+    const isCenter = inner.includes('horizontal="center"');
+    if (isSz12 && isCenter) {
+      if (headerStyleId === -1 || fontId === 21) {
+        headerStyleId = i;
+      }
+    }
+  }
+
+  // 6. 兜底保护：若用户上传的精简模板未预置对应对齐样式，安全无损追加到 <cellXfs>
+  let newStylesXml: string | undefined = undefined;
+  if (centerStyleId === -1 || leftStyleId === -1 || headerStyleId === -1) {
+    let workingXml = stylesXml;
+    let blackFontId = -1;
+    let blackFont12Id = -1;
+    for (let f = 0; f < fonts.length; f++) {
+      const font = fonts[f];
+      const isRed = font.includes("FFFF0000") || font.includes("FFC00000") || font.includes("FF9C0006");
+      const isBold = font.includes("<b/>") || font.includes("<b>");
+      if (!isRed && !isBold) {
+        if (blackFontId === -1) blackFontId = f;
+        if (f === 19) blackFontId = f;
+        const isSz12 = font.includes('sz val="12"') || font.includes('sz val="12.0"');
+        if (isSz12) {
+          if (blackFont12Id === -1 || f === 21) blackFont12Id = f;
+        }
+      }
+    }
+    if (blackFontId === -1) blackFontId = 0;
+    if (blackFont12Id === -1) blackFont12Id = blackFontId;
+
+    let thinBorderId = -1;
+    for (let b = 0; b < borders.length; b++) {
+      const border = borders[b];
+      if (border.includes("<left style=") && border.includes("<right style=") && border.includes("<top style=") && border.includes("<bottom style=")) {
+        thinBorderId = b;
+        if (b === 5) break;
+      }
+    }
+    if (thinBorderId === -1) thinBorderId = 0;
+
+    let currentCellXfsCount = cellXfs.length;
+
+    if (centerStyleId === -1) {
+      centerStyleId = currentCellXfsCount++;
+      const centerXml = `<xf numFmtId="0" fontId="${blackFontId}" fillId="0" borderId="${thinBorderId}" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>`;
+      workingXml = workingXml.replace(/<\/cellXfs>/, `${centerXml}</cellXfs>`);
+      workingXml = workingXml.replace(/(<cellXfs\s+count=")(\d+)(")/, (_, p1, c, p3) => `${p1}${parseInt(c, 10) + 1}${p3}`);
+    }
+
+    if (leftStyleId === -1) {
+      leftStyleId = currentCellXfsCount++;
+      const leftXml = `<xf numFmtId="0" fontId="${blackFontId}" fillId="0" borderId="${thinBorderId}" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center" wrapText="1"/></xf>`;
+      workingXml = workingXml.replace(/<\/cellXfs>/, `${leftXml}</cellXfs>`);
+      workingXml = workingXml.replace(/(<cellXfs\s+count=")(\d+)(")/, (_, p1, c, p3) => `${p1}${parseInt(c, 10) + 1}${p3}`);
+    }
+
+    if (headerStyleId === -1) {
+      headerStyleId = currentCellXfsCount++;
+      const headerXml = `<xf numFmtId="0" fontId="${blackFont12Id}" fillId="0" borderId="${thinBorderId}" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>`;
+      workingXml = workingXml.replace(/<\/cellXfs>/, `${headerXml}</cellXfs>`);
+      workingXml = workingXml.replace(/(<cellXfs\s+count=")(\d+)(")/, (_, p1, c, p3) => `${p1}${parseInt(c, 10) + 1}${p3}`);
+    }
+    newStylesXml = workingXml;
+  }
+
+  return { centerStyleId, leftStyleId, headerStyleId, newStylesXml };
+}
+
+/**
+ * 内部辅助：根据任务各项文本内容估算行高。
+ * 质量目标、质量标准及解释说明常包含分条换行或较长说明文本，
+ * 通过段落换行与估算列宽换行综合计算总行数，确保所有内容完整展示，杜绝上下截断。
+ *
+ * @param task 单项绩效考核任务
+ * @returns 适配的行高数值（单位：pt）
+ */
+function estimateTaskRowHeight(task: PerformanceTask): number {
+  const getLineCount = (text: string | undefined, charsPerLine: number): number => {
+    if (!text) return 1;
+    const paragraphs = text.split(/\r?\n/);
+    let totalLines = 0;
+    for (const p of paragraphs) {
+      const len = p.trim().length;
+      totalLines += Math.max(1, Math.ceil(len / charsPerLine));
+    }
+    return totalLines;
+  };
+
+  // F列 解释说明 (列宽约 31.5, 容纳约 16 个中文字符)
+  const linesF = getLineCount(task.description, 16);
+  // I列 质量目标 (列宽约 24.1, 容纳约 12 个中文字符)
+  const linesI = getLineCount(task.quality_target, 12);
+  // L列 质量标准 (列宽约 35.2, 容纳约 18 个中文字符)
+  const linesL = getLineCount(task.quality_standard, 18);
+
+  const maxLines = Math.max(1, linesF, linesI, linesL);
+  if (maxLines <= 1) return 27;
+  if (maxLines === 2) return 45;
+  if (maxLines === 3) return 60;
+  return Math.min(120, 20 + maxLines * 16);
+}
+
+/**
+ * 内部辅助：在 sheet XML 中更新指定行的行高并设置 customHeight="1"
  *
  * @param sheetXml sheet 工作表 XML 内容
- * @param rowNum 提取样式的行号（例如 10）
- * @returns 各列名到样式 ID 的映射表，例如 { A: 60, B: 201, ... }
+ * @param rn 行号，如 10
+ * @param height 目标行高
+ * @returns 更新后的 sheet XML
  */
-function extractRowStyles(sheetXml: string, rowNum: number): Record<string, number | undefined> {
-  const rowMatch = sheetXml.match(new RegExp(`<row r="${rowNum}"[\\s\\S]*?<\\/row>`));
-  const styles: Record<string, number | undefined> = {};
-  if (!rowMatch) return styles;
-  const cellMatches = [...rowMatch[0].matchAll(/<c r="([A-Z]+)\d+"(?: s="(\\d+)")?[^>]*>/g)];
-  for (const match of cellMatches) {
-    const col = match[1];
-    const sId = match[2] !== undefined ? parseInt(match[2], 10) : undefined;
-    styles[col] = sId;
-  }
-  return styles;
+function updateRowHeight(sheetXml: string, rn: number, height: number): string {
+  const rowRegex = new RegExp(`<row r="${rn}"([^>]*)>`);
+  return sheetXml.replace(rowRegex, (_match, attrs) => {
+    // 关键修复：必须使用单词边界 \b 防止误伤 customHeight 内部的 ht=" 字符串导致生成畸形 customHeig 属性损坏 Excel
+    const cleanAttrs = attrs
+      .replace(/\s*\bht="[^"]*"/g, "")
+      .replace(/\s*\bcustomHeight="[^"]*"/g, "")
+      .trim();
+    const prefix = cleanAttrs ? ` ${cleanAttrs}` : "";
+    return `<row r="${rn}"${prefix} ht="${height}" customHeight="1">`;
+  });
 }
 
 /**
@@ -417,9 +608,31 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
   if (!ssFile) throw new Error("找不到 sharedStrings.xml");
   let ssXml = await ssFile.async("text");
 
-  // ── 4.1 动态提取模板任务首行（第 10 行）各列的原始样式 ──
-  // 实现无论用户上传何种模板，任务各列样式均与该模板 100% 保持一致且行列统一
-  const taskColStyles = extractRowStyles(sheetXml, 10);
+  // ── 4.1 动态解析工作考核项与头部信息样式（确保 10/12 号黑色字体、四周边框完整、以及质量目标/标准严格居左） ──
+  const stylesFile = zip.file("xl/styles.xml");
+  let stylesXml = stylesFile ? await stylesFile.async("text") : "";
+  const { centerStyleId, leftStyleId, headerStyleId, newStylesXml } = resolveTaskStyles(stylesXml);
+  if (newStylesXml) {
+    stylesXml = newStylesXml;
+  }
+
+  // 建立列名到样式索引的映射字典：
+  // 序号(A)、指标类型(B)、指标等级(C)、权重(D)、所属板块(E)、时间目标(G)、数量目标(H)、时间标准(J)、数量标准(K) 采用居中样式
+  // 解释说明(F)、质量目标(I)、质量标准(L) 严格采用居左样式
+  const taskColStyles: Record<string, number> = {
+    A: centerStyleId,
+    B: centerStyleId,
+    C: centerStyleId,
+    D: centerStyleId,
+    E: centerStyleId,
+    F: leftStyleId,
+    G: centerStyleId,
+    H: centerStyleId,
+    I: leftStyleId, // 质量目标，严格居左对齐
+    J: centerStyleId,
+    K: centerStyleId,
+    L: leftStyleId, // 质量标准，严格居左对齐
+  };
 
   // ── 5. 写入字符串到单元格的统一辅助函数 ──
   const writeStr = (cellRef: string, value: string, styleId?: number) => {
@@ -438,7 +651,7 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
   const finalEvaluatorPos = (evaluatorPosition || "").trim() || DEFAULT_FORMAL_EVALUATOR_POSITION;
 
   // 动态字段：被考核人姓名与岗位
-  const finalName = (name || "").trim() || "杨祝翔";
+  const finalName = (name || "").trim() || "杨砚翔";
   const finalPosition = (position || "").trim() || "APP开发工程师";
 
   // A1：在 sharedStrings 中直接替换月份文字（不改 XML 结构与居中样式）
@@ -456,36 +669,27 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
     }
   }
 
-  // 写入头部单元格：不传 styleId，完整保留用户上传模板所定义的原始字体、加粗、边框与对齐样式
-  // D2 (所属公司)
+  // 写入头部单元格：
+  // D2、D5 继承模板原生样式（模板原生自带 12号字）；
+  // D3、H3、L3、D4、H4、L4 安全写入 12号字黑色常规居中规范样式 headerStyleId，确保填写的头部信息内容严格为 12 号字
   writeStr("D2", finalCompany);
-  // D3 (被考核人)
-  writeStr("D3", finalName);
-  // H3 (所属部门)
-  writeStr("H3", finalDepartment);
-  // L3 (岗位名称)
-  writeStr("L3", finalPosition);
-  // D4 (考核人姓名)
-  writeStr("D4", finalEvaluator);
-  // H4 (考核人部门)
-  writeStr("H4", finalEvaluatorDept);
-  // L4 (考核人岗位)
-  writeStr("L4", finalEvaluatorPos);
+  writeStr("D3", finalName, headerStyleId);
+  writeStr("H3", finalDepartment, headerStyleId);
+  writeStr("L3", finalPosition, headerStyleId);
+  writeStr("D4", finalEvaluator, headerStyleId);
+  writeStr("H4", finalEvaluatorDept, headerStyleId);
+  writeStr("L4", finalEvaluatorPos, headerStyleId);
 
-  // D5：考核周期
+  // D5：考核周期（模板 D5 原生即为 12号字加粗样式）
   const periodStr = `${year} 年   ${month}   月   1 日 至 ${year} 年   ${month}   月 ${lastDay} 日`;
   writeStr("D5", periodStr);
 
   // ── 7. 处理任务行 ──
   const N = tasks.length;
 
-  // 7a. 若任务数 > 4，在第 13 行之后插入 N-4 个新行（动态继承第 10 行统一列样式与第 13 行高）
+  // 7a. 若任务数 > 4，在第 13 行之后插入 N-4 个新行（动态继承统一列样式与统一边框）
   if (N > 4) {
     const insertCount = N - 4;
-
-    const row13Match = sheetXml.match(/<row r="13"[\s\S]*?<\/row>/);
-    if (!row13Match) throw new Error("模板结构异常：找不到第 13 行");
-    const row13Xml = row13Match[0];
 
     const insertedRows: string[] = [];
     for (let k = 0; k < insertCount; k++) {
@@ -495,7 +699,7 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
         const sAttr = taskColStyles[col] !== undefined ? ` s="${taskColStyles[col]}"` : "";
         cellsXml += `<c r="${col}${newRn}"${sAttr}/>`;
       }
-      const rowOpenTag = row13Xml.match(/<row [^>]+>/)?.[0].replace(/r="13"/, `r="${newRn}"`) || `<row r="${newRn}">`;
+      const rowOpenTag = `<row r="${newRn}" customFormat="1" ht="27" customHeight="1" spans="1:12">`;
       insertedRows.push(`${rowOpenTag}${cellsXml}</row>`);
     }
 
@@ -518,31 +722,41 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
 
     // 在第 13 行 </row> 之后插入新行
     sheetXml = sheetXml.replace(/(<row r="13"[\s\S]*?<\/row>)/, `$1${insertedRows.join("")}`);
+
+    // 同步更新 dimension 坐标范围
+    sheetXml = sheetXml.replace(/(<dimension ref="[A-Z]+1:[A-Z]+)(\d+)(")/, (_, p1, lastRow, p3) => {
+      const newLastRow = parseInt(lastRow, 10) + insertCount;
+      return `${p1}${newLastRow}${p3}`;
+    });
   }
 
-  // 7b. 写入各行任务数据（各列统一采用从模板提取的列样式 taskColStyles，保证绝对整齐规范）
+  // 7b. 写入各行任务数据（各列严格采用统一黑色样式、全封闭细边框，质量目标与质量标准居左对齐）
   for (let i = 0; i < N; i++) {
     const rn = 10 + i;
     const task = tasks[i];
 
-    // 序号（A列，数字，继承 A 列样式）
+    // 自适应多行内容计算行高，确保无论是在前 4 行还是超过 4 行的新增行，排版视觉完全一致且不遮挡文字
+    const rowHt = estimateTaskRowHeight(task);
+    sheetXml = updateRowHeight(sheetXml, rn, rowHt);
+
+    // 序号（A列，数字，居中）
     sheetXml = patchCellNumWithStyle(sheetXml, `A${rn}`, i + 1, taskColStyles["A"]);
 
-    // 指标类型（B列，继承 B 列样式）
+    // 指标类型（B列，居中）
     {
       const r = upsertSharedString(ssXml, task.type || "KPI");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `B${rn}`, r.index, taskColStyles["B"]);
     }
 
-    // 指标等级（C列，继承 C 列样式）
+    // 指标等级（C列，居中）
     {
       const r = upsertSharedString(ssXml, task.level || "重要关键任务");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `C${rn}`, r.index, taskColStyles["C"]);
     }
 
-    // 权重（D列）：扣分项写入文字，普通百分比写入规范百分比字符串，继承 D 列样式
+    // 权重（D列）：扣分项写入文字，普通百分比写入规范百分比字符串，居中
     const isDeduction = task.weight === "扣分项" || (typeof task.weight === "string" && task.weight.includes("扣分")) || task.category === "市场侧临时新增开发任务" || (task.description && task.description.includes("市场侧临时新增"));
 
     let weightStr = "25%";
@@ -566,56 +780,56 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
       sheetXml = patchCellStrWithStyle(sheetXml, `D${rn}`, r.index, taskColStyles["D"]);
     }
 
-    // 所属板块（E列）
+    // 所属板块（E列，居中）
     {
       const r = upsertSharedString(ssXml, task.category || "/");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `E${rn}`, r.index, taskColStyles["E"]);
     }
 
-    // 解释说明（F列）
+    // 解释说明（F列，居左）
     {
       const r = upsertSharedString(ssXml, task.description || "");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `F${rn}`, r.index, taskColStyles["F"]);
     }
 
-    // 时间目标（G列）
+    // 时间目标（G列，居中）
     {
       const r = upsertSharedString(ssXml, task.time_target || "");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `G${rn}`, r.index, taskColStyles["G"]);
     }
 
-    // 数量目标（H列）
+    // 数量目标（H列，居中）
     {
       const r = upsertSharedString(ssXml, task.count_target || "/");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `H${rn}`, r.index, taskColStyles["H"]);
     }
 
-    // 质量目标（I列）
+    // ★ 质量目标（I列，严格居左对齐）
     {
       const r = upsertSharedString(ssXml, task.quality_target || "");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `I${rn}`, r.index, taskColStyles["I"]);
     }
 
-    // 时间标准（J列）
+    // 时间标准（J列，居中）
     {
       const r = upsertSharedString(ssXml, task.time_standard || "");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `J${rn}`, r.index, taskColStyles["J"]);
     }
 
-    // 数量标准（K列）
+    // 数量标准（K列，居中）
     {
       const r = upsertSharedString(ssXml, task.count_standard || "/");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `K${rn}`, r.index, taskColStyles["K"]);
     }
 
-    // 质量标准（L列）
+    // ★ 质量标准（L列，严格居左对齐）
     {
       const r = upsertSharedString(ssXml, task.quality_standard || "");
       ssXml = r.newSsXml;
@@ -626,6 +840,7 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
   // 7c. 若任务数 < 4，清空剩余行（使用 taskColStyles 保持与任务行 100% 统一的排版与边框）
   if (N < 4) {
     for (let r = 10 + N; r <= 13; r++) {
+      sheetXml = updateRowHeight(sheetXml, r, 27);
       for (const col of ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]) {
         sheetXml = patchCellEmpty(sheetXml, `${col}${r}`, taskColStyles[col]);
       }
@@ -635,6 +850,9 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
   // ── 8. 写回 ZIP，生成 ArrayBuffer ──
   zip.file(sheetPath, sheetXml);
   zip.file("xl/sharedStrings.xml", ssXml);
+  if (newStylesXml) {
+    zip.file("xl/styles.xml", stylesXml);
+  }
 
   const outputBuffer = await zip.generateAsync({
     type: "arraybuffer",

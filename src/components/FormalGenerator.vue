@@ -1325,6 +1325,7 @@ ${taskSummary}`;
 }
 
 .grid-textarea {
+  text-align: left;
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-h);
