@@ -849,6 +849,46 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
     }
   }
 
+  // 7d. 动态更新“工作考核项”后续固定项的连续序号（如临时新增工作、常规类工作、工作态度、工作质量等）
+  // 注意：严格只更新工作考核那一块内容的序号，绝不越界修改后续“职能部门考核项”等其它板块的独立序号
+  {
+    // 1. 确定工作考核项后续固定项的起始行号：
+    //    当 N >= 4 时，任务行占据 10 到 (10 + N - 1) 行，后续固定项从 10 + N 行开始；
+    //    当 N < 4 时，任务行只占前 N 行，固定项依然从原生第 14 行开始。
+    const fixedStartRn = Math.max(14, 10 + N);
+
+    // 2. 动态探测下一个板块“职能部门考核项”所在行号，确保绝对不越界修改非工作考核项的内容
+    const siMatches = [...ssXml.matchAll(/<si>[\s\S]*?<\/si>/g)];
+    let deptSiIndex = -1;
+    for (let idx = 0; idx < siMatches.length; idx++) {
+      const rawText = siMatches[idx][0].replace(/<[^>]+>/g, "").trim();
+      if (rawText === "职能部门考核项") {
+        deptSiIndex = idx;
+        break;
+      }
+    }
+
+    let deptSectionRow = -1;
+    if (deptSiIndex !== -1) {
+      const deptCellMatch = sheetXml.match(new RegExp(`<c r="[A-Z]+(\\d+)"[^>]*\\bt="s"\\b[^>]*><v>${deptSiIndex}<\\/v><\\/c>`));
+      if (deptCellMatch) {
+        deptSectionRow = parseInt(deptCellMatch[1], 10);
+      }
+    }
+
+    // 兜底防御：若模板未通过 sharedString 匹配到，按原有结构公式推导（原生18行偏移 N-4 行后为 14 + N）
+    if (deptSectionRow === -1 || deptSectionRow <= fixedStartRn) {
+      deptSectionRow = N > 4 ? 14 + N : 18;
+    }
+
+    // 3. 严格只更新 [fixedStartRn, deptSectionRow - 1] 区间内的行序号，使其紧接在动态任务的第 N 项之后连续递增
+    let currentSeq = N + 1;
+    for (let rn = fixedStartRn; rn < deptSectionRow; rn++) {
+      sheetXml = patchCellNumWithStyle(sheetXml, `A${rn}`, currentSeq, taskColStyles["A"]);
+      currentSeq++;
+    }
+  }
+
   // ── 8. 写回 ZIP，生成 ArrayBuffer ──
   zip.file(sheetPath, sheetXml);
   zip.file("xl/sharedStrings.xml", ssXml);
