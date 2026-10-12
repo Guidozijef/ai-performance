@@ -6,13 +6,54 @@
  * 遵循 Google TS/Vue 编码标准，包含详细中文注释。
  */
 
-import { ref, onMounted, computed } from "vue";
-import { geminiConfig, excelTemplate, formalEmployees, addFormalEmployee, removeFormalEmployee, resetFormalGenerationStatus, performanceMonth, DEFAULT_TEMPLATE_PATH, DEFAULT_TEMPLATE_NAME, DEFAULT_STANDARDS_PATH, qualityStandards, qualityStandardsLoaded } from "../store";
+import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import {
+  geminiConfig,
+  excelTemplate,
+  formalEmployees,
+  addFormalEmployee,
+  removeFormalEmployee,
+  resetFormalGenerationStatus,
+  performanceMonth,
+  DEFAULT_TEMPLATE_PATH,
+  DEFAULT_TEMPLATE_NAME,
+  DEFAULT_STANDARDS_PATH,
+  qualityStandards,
+  defaultQualityStandards,
+  customQualityStandards,
+  customStandardsFileName,
+  setDefaultQualityStandards,
+  mergeQualityStandards,
+  resetQualityStandardsToDefault,
+} from "../store";
 import type { FormalEmployeeRow } from "../store";
 import { generateFormalPerformance } from "../utils/geminiHelper";
-import { writePerformanceToTemplate, downloadExcelFile, readPerformanceFromExcel, parseQualityStandards } from "../utils/excelHelper";
+import {
+  writePerformanceToTemplate,
+  downloadExcelFile,
+  readPerformanceFromExcel,
+  parseQualityStandards,
+} from "../utils/excelHelper";
 import type { PerformanceTask } from "../utils/excelHelper";
-import { Users, Trash2, Sparkles, Download, AlertTriangle, FileSpreadsheet, RefreshCw, Upload, Plus, XCircle, RotateCcw } from "lucide-vue-next";
+import {
+  Users,
+  Trash2,
+  Sparkles,
+  Download,
+  AlertTriangle,
+  FileSpreadsheet,
+  RefreshCw,
+  Upload,
+  Plus,
+  XCircle,
+  RotateCcw,
+  X,
+  Target,
+  CheckCircle2,
+  FileUp,
+  Search,
+  Info,
+} from "lucide-vue-next";
 
 // 记录当前正在编辑任务的员工 ID
 const activeEmpId = ref<string | null>(null);
@@ -47,11 +88,12 @@ const validationError = computed(() => {
 });
 
 // 计算当前正在编辑员工的任务指标规则校验
-// 包含四项核心校验规则：
-// 1. 各项常规指标权重不超过 30%
-// 2. 常规指标总权重刚好等于 100%（扣分项任务免计）
-// 3. 重要战略/关键任务对应的类型必须为 KPI，常规/辅助任务对应的类型必须为 CPI
-// 4. 重要任务比例最低不能低于 20%
+// 包含五项核心校验规则：
+// 1. 各项常规指标权重最大不超过 30%
+// 2. 常规任务/辅助任务 (CPI) 单项权重不能超过 20%
+// 3. 常规指标总权重刚好等于 100%（扣分项任务免计）
+// 4. 重要战略/关键任务对应的类型必须为 KPI，常规/辅助任务对应的类型必须为 CPI
+// 5. 重要任务比例最低不能低于 20%
 const activeEmpValidationError = computed(() => {
   const emp = activeEmployee.value;
   if (!emp || emp.status !== "success" || !emp.tasks || emp.tasks.length === 0) {
@@ -75,6 +117,10 @@ const activeEmpValidationError = computed(() => {
 
     if (w > 0.30001) {
       return `第 ${i + 1} 项“${t.category || "指标"}”权重为 ${(w * 100).toFixed(0)}%，已超过最大限制 30%。`;
+    }
+
+    if ((t.level === "常规执行任务" || t.level === "辅助零散任务" || t.type === "CPI") && w > 0.20001) {
+      return `常规/辅助任务（CPI，如第 ${i + 1} 项“${t.category || "指标"}”）权重为 ${(w * 100).toFixed(0)}%，不能超过 20%。`;
     }
 
     if (t.level === "重要关键任务" && w < 0.1999) {
@@ -116,14 +162,14 @@ onMounted(async () => {
   }
 
   // 2. 自动加载并解析企业绩效质量标准库
-  if (qualityStandards.value.length === 0) {
+  if (defaultQualityStandards.value.length === 0) {
     try {
-      const res = await fetch(DEFAULT_STANDARDS_PATH);
+      // 携带时间戳参数破坏浏览器 HTTP 缓存，确保模板更新后即刻生效
+      const res = await fetch(`${DEFAULT_STANDARDS_PATH}?t=${Date.now()}`);
       if (res.ok) {
         const buf = await res.arrayBuffer();
-        const list = await parseQualityStandards(buf);
-        qualityStandards.value = list;
-        qualityStandardsLoaded.value = true;
+        const list = await parseQualityStandards(buf, false);
+        setDefaultQualityStandards(list);
       }
     } catch (err) {
       console.warn("加载绩效质量标准库失败:", err);
@@ -435,6 +481,166 @@ ${taskSummary}`;
     target.value = "";
   }
 }
+
+// ==========================================
+// 绩效质量标准库上传、模板下载与弹窗状态管理
+// ==========================================
+
+// 绩效质量标准库配置弹窗显隐状态
+const showStandardsModal = ref(false);
+// 标准库实时预览搜索过滤关键词
+const standardsSearchQuery = ref("");
+// 标准库上传解析错误提示
+const standardsUploadError = ref("");
+// 是否正在解析标准库文件
+const isStandardsUploading = ref(false);
+
+/**
+ * 计算符合当前搜索关键词的标准库条目列表
+ */
+const filteredStandards = computed(() => {
+  const query = standardsSearchQuery.value.trim().toLowerCase();
+  if (!query) {
+    return qualityStandards.value;
+  }
+  return qualityStandards.value.filter(
+    (item) =>
+      item.categoryType.toLowerCase().includes(query) ||
+      item.qualityTarget.toLowerCase().includes(query) ||
+      item.qualityStandard.toLowerCase().includes(query)
+  );
+});
+
+/**
+ * 安全解析并导入用户上传的自定义标准库文件
+ *
+ * @param file 用户选中的 Excel 文件对象
+ */
+const processCustomStandardsFile = async (file: File) => {
+  // 安全校验：文件大小限制 10MB
+  if (file.size > 10 * 1024 * 1024) {
+    standardsUploadError.value = "上传的标准库文件不能超过 10MB！";
+    return;
+  }
+
+  // 安全校验：文件格式限制
+  if (!file.name.toLowerCase().endsWith(".xlsx")) {
+    standardsUploadError.value = "请上传 .xlsx 格式的标准库 Excel 文件！";
+    return;
+  }
+
+  isStandardsUploading.value = true;
+  standardsUploadError.value = "";
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const customList = await parseQualityStandards(arrayBuffer, true);
+    if (customList.length === 0) {
+      standardsUploadError.value =
+        "未能从文件中解析出有效的质量标准条目，请确认表头包含[类型/质量目标/质量标准]并参考模板。";
+    } else {
+      mergeQualityStandards(customList, file.name);
+      standardsUploadError.value = "";
+    }
+  } catch (err: any) {
+    console.error("解析自定义质量标准库失败:", err);
+    standardsUploadError.value = `解析失败: ${err?.message || "Excel 格式异常，请参照规范模板"}`;
+  } finally {
+    isStandardsUploading.value = false;
+  }
+};
+
+/**
+ * 处理用户上传自定义绩效质量标准库 Excel 文件
+ */
+const handleCustomStandardsUpload = async (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file) return;
+
+  await processCustomStandardsFile(file);
+  target.value = "";
+};
+
+/**
+ * 处理拖拽上传质量标准库文件
+ */
+const handleStandardsDrop = async (event: DragEvent) => {
+  event.preventDefault();
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+
+  await processCustomStandardsFile(file);
+};
+
+/**
+ * 下载标准库官方规范模板
+ */
+const handleDownloadStandardsTemplate = async () => {
+  try {
+    const res = await fetch(`${DEFAULT_STANDARDS_PATH}?t=${Date.now()}`);
+    if (!res.ok) throw new Error("获取标准库模板文件失败");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "绩效质量标准库_模板.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err: any) {
+    console.error("下载模板出错:", err);
+    alert(`下载模板失败: ${err?.message || "请稍后重试"}`);
+  }
+};
+
+/**
+ * 恢复为系统预置默认标准库
+ */
+const handleResetStandardsToDefault = () => {
+  resetQualityStandardsToDefault();
+  standardsUploadError.value = "";
+};
+
+/**
+ * 监听标准库弹窗开关，动态控制全局页面滚动锁定 (Scroll Lock)
+ * 确保弹窗内部滚动时，外部宿主页面被牢固锁定，禁止任何背景联动与滚动穿透。
+ */
+watch(showStandardsModal, (isOpen) => {
+  if (typeof document !== "undefined") {
+    if (isOpen) {
+      document.body.classList.add("modal-scroll-locked");
+    } else {
+      document.body.classList.remove("modal-scroll-locked");
+    }
+  }
+});
+
+/**
+ * 全局键盘事件监听：按下 Escape 键时关闭标准库管理弹窗
+ */
+const handleGlobalKeyDown = (e: KeyboardEvent) => {
+  if (e.key === "Escape" && showStandardsModal.value) {
+    showStandardsModal.value = false;
+  }
+};
+
+onMounted(() => {
+  if (typeof window !== "undefined") {
+    window.addEventListener("keydown", handleGlobalKeyDown);
+  }
+});
+
+// 组件卸载时释放全局监听及滚动锁，防止页面永久处于锁定状态
+onUnmounted(() => {
+  if (typeof document !== "undefined") {
+    document.body.classList.remove("modal-scroll-locked");
+  }
+  if (typeof window !== "undefined") {
+    window.removeEventListener("keydown", handleGlobalKeyDown);
+  }
+});
 </script>
 
 <template>
@@ -445,9 +651,25 @@ ${taskSummary}`;
       <div class="header-title-group">
         <h2>正式员工绩效智能填报</h2>
         <span class="header-subtitle" v-if="excelTemplate.fileName">({{ excelTemplate.fileName }})</span>
-        <span class="standards-badge" v-if="qualityStandards.length > 0">🎯 已联动质量标准库 ({{ qualityStandards.length }}条规范)</span>
+        <button
+          type="button"
+          class="standards-badge"
+          @click="showStandardsModal = true"
+          title="点击查看并配置绩效质量标准库（支持上传与模板下载）"
+        >
+          🎯 质量标准库 ({{ qualityStandards.length }}条规范<span v-if="customQualityStandards.length > 0" class="custom-sub-tag"> · 自定义</span>)
+        </button>
       </div>
       <div class="header-actions">
+        <button
+          type="button"
+          class="btn btn-outline btn-sm-action"
+          @click="showStandardsModal = true"
+          title="配置并管理绩效质量标准库"
+        >
+          <Target :size="14" />
+          <span>管理标准库</span>
+        </button>
         <span class="template-status-tag" :class="{ ok: excelTemplate.buffer }">
           {{ excelTemplate.fileName ? `已载入: ${excelTemplate.fileName}` : templateLoadingStatus || "未检测到模板" }}
         </span>
@@ -654,9 +876,9 @@ ${taskSummary}`;
                     <input type="text" v-model="task.category" class="grid-input" @change="handleCellChange(activeEmployee)" />
                   </td>
 
-                  <!-- 解释说明 -->
+                  <!-- 解释说明 (居中对齐) -->
                   <td>
-                    <textarea v-model="task.description" class="grid-textarea" @change="handleCellChange(activeEmployee)"></textarea>
+                    <textarea v-model="task.description" class="grid-textarea desc-textarea" @change="handleCellChange(activeEmployee)"></textarea>
                   </td>
 
                   <!-- 时间目标 -->
@@ -768,6 +990,197 @@ ${taskSummary}`;
         </div>
       </div>
     </div>
+
+    <!-- 绩效质量标准库管理弹窗 (全局挂载至 body，彻底脱离父级卡片上下文) -->
+    <Teleport to="body">
+      <div
+        class="modal-mask standards-modal-mask"
+        v-if="showStandardsModal"
+        @click.self="showStandardsModal = false"
+        @wheel.self.prevent
+        @touchmove.self.prevent
+      >
+        <div class="modal-container glass-card standards-modal-container" @wheel.stop>
+          <!-- 弹窗头部 -->
+          <div class="modal-header">
+            <div class="modal-header-title">
+              <Target class="modal-title-icon" :size="22" />
+              <div>
+                <h3>绩效质量标准库配置与管理</h3>
+                <p class="modal-header-desc">
+                  支持下载官方规范模板、上传自定义标准库，并与系统默认库智能融合生效
+                </p>
+              </div>
+            </div>
+            <button type="button" class="btn-icon-close" @click="showStandardsModal = false" title="关闭弹窗 (Esc)">
+              <X :size="20" />
+            </button>
+          </div>
+
+          <!-- 弹窗内容主体 -->
+          <div class="modal-body standards-modal-body">
+            <!-- 状态概览看板 -->
+            <div class="standards-stats-bar">
+              <div class="stat-pill">
+                <span class="pill-label">系统预置条目</span>
+                <span class="pill-value">{{ defaultQualityStandards.length }} 条</span>
+              </div>
+              <div class="stat-pill" :class="{ 'pill-active': customQualityStandards.length > 0 }">
+                <span class="pill-label">自定义已融合</span>
+                <span class="pill-value">{{ customQualityStandards.length }} 条</span>
+              </div>
+              <div class="stat-pill pill-total">
+                <span class="pill-label">当前生效总数</span>
+                <span class="pill-value highlight">{{ qualityStandards.length }} 条</span>
+              </div>
+              <div class="standards-reset-wrap" v-if="customQualityStandards.length > 0">
+                <button
+                  type="button"
+                  class="btn btn-outline btn-xs-reset"
+                  @click="handleResetStandardsToDefault"
+                  title="清除自定义上传，还原为纯系统预置标准库"
+                >
+                  <RotateCcw :size="13" />
+                  <span>恢复系统默认</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- 自定义库已激活横幅提示 -->
+            <div class="custom-active-banner" v-if="customStandardsFileName">
+              <CheckCircle2 :size="16" class="banner-icon" />
+              <span>当前已融合自定义文件：<strong>{{ customStandardsFileName }}</strong>（同名分类优先覆盖，新增分类自动合流）。</span>
+            </div>
+
+            <!-- 操作卡片网格：下载模板 vs 上传文件 -->
+            <div class="standards-actions-grid">
+              <!-- 卡片 1: 下载模板 -->
+              <div class="action-card">
+                <div class="card-icon-wrap template-icon">
+                  <FileSpreadsheet :size="24" />
+                </div>
+                <div class="card-text">
+                  <h4>下载质量标准库模板</h4>
+                  <p>包含 [序号、类型、质量目标、质量标准扣分细则] 的标准 4 列规范 Excel 模板。</p>
+                </div>
+                <button
+                  type="button"
+                  class="btn btn-outline btn-download-template"
+                  @click="handleDownloadStandardsTemplate"
+                >
+                  <Download :size="15" />
+                  <span>下载标准库模板 (.xlsx)</span>
+                </button>
+              </div>
+
+              <!-- 卡片 2: 上传自定义标准 -->
+              <div
+                class="action-card upload-card"
+                @dragover.prevent
+                @drop="handleStandardsDrop"
+              >
+                <div class="card-icon-wrap upload-icon">
+                  <FileUp :size="24" />
+                </div>
+                <div class="card-text">
+                  <h4>上传自定义质量标准库</h4>
+                  <p>支持拖拽或选择 .xlsx 文件，相同类型将智能覆盖扣分细则，新增类型自动合流。</p>
+                </div>
+                <label class="btn btn-primary btn-upload-standards" :class="{ disabled: isStandardsUploading }">
+                  <input
+                    type="file"
+                    accept=".xlsx"
+                    class="hidden-input"
+                    @change="handleCustomStandardsUpload"
+                    :disabled="isStandardsUploading"
+                  />
+                  <Upload :size="15" />
+                  <span>{{ isStandardsUploading ? "正在解析导入..." : "选择文件上传 (.xlsx)" }}</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- 上传错误警告 -->
+            <div v-if="standardsUploadError" class="validation-warning standards-warning">
+              <AlertTriangle :size="18" class="warning-icon" />
+              <span>{{ standardsUploadError }}</span>
+            </div>
+
+            <!-- 当前生效规则实时预览区 -->
+            <div class="standards-preview-section">
+              <div class="preview-header">
+                <div class="preview-title">
+                  <h4>当前生效标准细则清单 ({{ filteredStandards.length }}/{{ qualityStandards.length }})</h4>
+                  <span class="preview-hint">AI 绩效推导时将 100% 优先按以下扣分细则与目标执行对齐</span>
+                </div>
+                <div class="preview-search">
+                  <Search :size="14" class="search-icon" />
+                  <input
+                    type="text"
+                    v-model="standardsSearchQuery"
+                    placeholder="搜索分类类型或标准关键词..."
+                    class="search-input"
+                  />
+                </div>
+              </div>
+
+              <!-- 规则列表表格 -->
+              <div class="standards-table-wrapper">
+                <table class="standards-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 50px;">序号</th>
+                      <th style="width: 140px;">业务类型 / 分类</th>
+                      <th style="width: 90px;">来源</th>
+                      <th style="width: 38%;">质量目标</th>
+                      <th>质量标准（违规扣分细则）</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-if="filteredStandards.length === 0">
+                      <td colspan="5" class="table-empty">
+                        未找到符合 "{{ standardsSearchQuery }}" 的标准规范条目
+                      </td>
+                    </tr>
+                    <tr
+                      v-for="(item, idx) in filteredStandards"
+                      :key="idx"
+                      :class="{ 'row-custom': item.isCustom }"
+                    >
+                      <td class="text-center font-mono">{{ idx + 1 }}</td>
+                      <td class="font-medium category-cell">
+                        <span>{{ item.categoryType }}</span>
+                      </td>
+                      <td>
+                        <span
+                          class="source-badge"
+                          :class="item.isCustom ? 'badge-custom' : 'badge-default'"
+                        >
+                          {{ item.isCustom ? "用户自定义" : "系统默认" }}
+                        </span>
+                      </td>
+                      <td class="pre-cell">{{ item.qualityTarget }}</td>
+                      <td class="pre-cell highlight-deduct">{{ item.qualityStandard }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- 弹窗底部 -->
+          <div class="modal-footer standards-modal-footer">
+            <div class="footer-tip">
+              <Info :size="14" />
+              <span>提示：修改或上传新标准库后，无需刷新页面，点击对应员工卡片的「重新推导」或「智能生成」即按新扣分细则生成。</span>
+            </div>
+            <button type="button" class="btn btn-outline" @click="showStandardsModal = false">
+              完成并关闭
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -812,13 +1225,38 @@ ${taskSummary}`;
 }
 
 .standards-badge {
-  font-size: 0.75rem;
-  padding: 3px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.775rem;
+  padding: 4px 10px;
   border-radius: 20px;
   background: rgba(168, 85, 247, 0.15);
   border: 1px solid rgba(168, 85, 247, 0.35);
   color: #c084fc;
   font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.standards-badge:hover {
+  background: rgba(168, 85, 247, 0.25);
+  border-color: rgba(168, 85, 247, 0.5);
+  transform: translateY(-1px);
+}
+
+.custom-sub-tag {
+  color: #34d399;
+  font-weight: 600;
+}
+
+.btn-sm-action {
+  font-size: 0.8rem !important;
+  padding: 6px 12px !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
 }
 
 .header-actions {
@@ -1230,6 +1668,7 @@ ${taskSummary}`;
 }
 .col-desc {
   min-width: 220px;
+  text-align: center;
 } /* 原 180px */
 .col-time {
   width: 150px;
@@ -1340,6 +1779,10 @@ ${taskSummary}`;
   outline: none;
   border-radius: 4px;
   transition: all 0.2s;
+}
+
+.desc-textarea {
+  text-align: center !important;
 }
 
 .grid-textarea:hover {
@@ -1635,5 +2078,480 @@ ${taskSummary}`;
 .btn-error-retry:hover {
   background: linear-gradient(135deg, #fbbf24 0%, #f87171 100%) !important;
   transform: translateY(-2px);
+}
+
+/* ============================================================
+   绩效质量标准库管理弹窗样式
+   ============================================================ */
+
+/* 全局宿主页面滚动锁定（弹窗开启期间禁止外部文档滚动穿透） */
+:global(body.modal-scroll-locked) {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+  touch-action: none !important;
+}
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  box-sizing: border-box;
+  overscroll-behavior: contain;
+}
+
+.standards-modal-container {
+  width: 1020px;
+  max-width: 95vw;
+  max-height: 90vh;
+  background: #111827;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.75);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  animation: modalScaleIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes modalScaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.standards-modal-container .modal-header {
+  padding: 18px 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.modal-header-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.modal-title-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.modal-header-title h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.modal-header-desc {
+  margin: 4px 0 0 0;
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+
+.btn-icon-close {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.btn-icon-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f8fafc;
+}
+
+.standards-modal-body {
+  padding: 20px 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: calc(90vh - 150px);
+}
+
+/* 状态统计看板 */
+.standards-stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
+
+.stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  font-size: 0.825rem;
+}
+
+.stat-pill.pill-active {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #34d399;
+}
+
+.stat-pill.pill-total {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+.pill-label {
+  color: #94a3b8;
+}
+
+.pill-value {
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.pill-value.highlight {
+  color: #818cf8;
+}
+
+.standards-reset-wrap {
+  margin-left: auto;
+}
+
+.btn-xs-reset {
+  font-size: 0.775rem !important;
+  padding: 4px 10px !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #f87171 !important;
+  border-color: rgba(239, 68, 68, 0.3) !important;
+}
+
+.btn-xs-reset:hover {
+  background: rgba(239, 68, 68, 0.1) !important;
+  border-color: rgba(239, 68, 68, 0.5) !important;
+}
+
+.custom-active-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 8px;
+  font-size: 0.825rem;
+  color: #34d399;
+}
+
+.banner-icon {
+  flex-shrink: 0;
+}
+
+/* 操作网格 */
+.standards-actions-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.action-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  transition: all 0.2s ease;
+}
+
+.action-card:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.upload-card {
+  border-style: dashed;
+}
+
+.upload-card:hover {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.05);
+}
+
+.card-icon-wrap {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-icon-wrap.template-icon {
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+}
+
+.card-icon-wrap.upload-icon {
+  background: rgba(99, 102, 241, 0.12);
+  color: #818cf8;
+}
+
+.card-text h4 {
+  margin: 0 0 4px 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.card-text p {
+  margin: 0;
+  font-size: 0.775rem;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+.btn-download-template,
+.btn-upload-standards {
+  margin-top: auto;
+  font-size: 0.825rem;
+  padding: 8px 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.btn-upload-standards.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.standards-warning {
+  margin: 0;
+}
+
+/* 预览区 */
+.standards-preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.preview-title h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.preview-hint {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  display: block;
+  margin-top: 2px;
+}
+
+.preview-search {
+  position: relative;
+  width: 260px;
+}
+
+.preview-search .search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #64748b;
+  pointer-events: none;
+}
+
+.preview-search .search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 12px 6px 30px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f1f5f9;
+  font-size: 0.8rem;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.preview-search .search-input:focus {
+  border-color: var(--accent);
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.standards-table-wrapper {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.standards-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  text-align: left;
+}
+
+.standards-table th {
+  position: sticky;
+  top: 0;
+  background: #1e293b;
+  padding: 10px 14px;
+  font-weight: 600;
+  color: #94a3b8;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  z-index: 2;
+  white-space: nowrap;
+}
+
+.standards-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  vertical-align: top;
+  color: #cbd5e1;
+  line-height: 1.5;
+}
+
+.standards-table tr:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.row-custom {
+  background: rgba(16, 185, 129, 0.03);
+}
+
+.row-custom td:first-child {
+  border-left: 3px solid #10b981;
+}
+
+.category-cell {
+  color: #f1f5f9;
+  font-weight: 600;
+}
+
+.source-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 2px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.badge-default {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.badge-custom {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  font-weight: 600;
+}
+
+.pre-cell {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.highlight-deduct {
+  color: #fcd34d;
+}
+
+.table-empty {
+  text-align: center;
+  padding: 30px !important;
+  color: #94a3b8;
+}
+
+/* 弹窗底部 */
+.standards-modal-footer {
+  padding: 14px 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.footer-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.775rem;
+  color: #94a3b8;
+}
+
+.footer-tip svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+@media (max-width: 768px) {
+  .standards-actions-grid {
+    grid-template-columns: 1fr;
+  }
+  .preview-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .preview-search {
+    width: 100%;
+  }
+  .standards-modal-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>

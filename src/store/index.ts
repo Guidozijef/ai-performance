@@ -272,8 +272,112 @@ export const excelTemplate = reactive<{
 });
 
 // 3.1 绩效质量标准库状态
+/** 系统预置默认质量标准库条目 */
+export const defaultQualityStandards = ref<QualityStandardItem[]>([]);
+/** 用户自定义上传的质量标准库条目 */
+export const customQualityStandards = ref<QualityStandardItem[]>([]);
+/** 用户自定义质量标准库文件名 */
+export const customStandardsFileName = ref<string>('');
+/** 当前生效的质量标准库条目列表（默认库与自定义库合并后的完整集合） */
 export const qualityStandards = ref<QualityStandardItem[]>([]);
+/** 标准库是否已完成初次载入 */
 export const qualityStandardsLoaded = ref<boolean>(false);
+
+/**
+ * 设置系统默认标准库，并同步更新当前生效标准库
+ *
+ * @param defaults 系统预置标准库列表
+ */
+export function setDefaultQualityStandards(defaults: QualityStandardItem[]): void {
+  defaultQualityStandards.value = defaults;
+  qualityStandardsLoaded.value = true;
+  // 若当前尚未上传自定义库，生效列表直接使用默认库
+  if (customQualityStandards.value.length === 0) {
+    qualityStandards.value = [...defaults];
+  } else {
+    // 若已存在自定义库，重新执行合并计算
+    mergeQualityStandards(customQualityStandards.value, customStandardsFileName.value);
+  }
+}
+
+/**
+ * 合并自定义质量标准库与系统默认标准库
+ *
+ * 业务合并规则：
+ * 1. 遍历默认标准库；
+ * 2. 若自定义标准库中存在相同业务类型（忽略大小写及首尾空格），则优先采用自定义库条目替换该分类（覆盖扣分与目标）；
+ * 3. 自定义库中新增的业务类型，全量追加到生效列表末尾；
+ * 4. 默认库中未被自定义覆盖的其他标准全量保留，实现两库融合。
+ *
+ * @param customList 用户上传解析出的标准条目列表
+ * @param fileName 自定义文件名称
+ */
+export function mergeQualityStandards(
+  customList: QualityStandardItem[],
+  fileName?: string
+): void {
+  customQualityStandards.value = customList;
+  if (fileName) {
+    customStandardsFileName.value = fileName;
+  }
+
+  // 1. 建立自定义分类分组映射表 (categoryKey -> QualityStandardItem[])
+  const customGroups = new Map<string, QualityStandardItem[]>();
+  customList.forEach((item) => {
+    const key = item.categoryType.trim().toLowerCase();
+    if (key) {
+      if (!customGroups.has(key)) {
+        customGroups.set(key, []);
+      }
+      customGroups.get(key)!.push({
+        ...item,
+        isCustom: true,
+      });
+    }
+  });
+
+  const merged: QualityStandardItem[] = [];
+  const replacedCategories = new Set<string>();
+
+  // 2. 遍历默认标准库，若该分类在自定义库中存在，则用自定义库的所有条目替换
+  defaultQualityStandards.value.forEach((defItem) => {
+    const key = defItem.categoryType.trim().toLowerCase();
+    if (customGroups.has(key)) {
+      if (!replacedCategories.has(key)) {
+        // 将自定义库中该分类对应的全部条目加入生效列表
+        const customItems = customGroups.get(key)!;
+        merged.push(...customItems);
+        replacedCategories.add(key);
+      }
+      // 同一分类下默认库的其余旧条目被自定义条目替换，跳过不重复添加
+    } else {
+      // 默认库中未被覆盖的标准条目原样保留
+      merged.push({
+        ...defItem,
+        isCustom: false,
+      });
+    }
+  });
+
+  // 3. 将自定义库中全新的业务分类追加到生效列表末尾
+  customGroups.forEach((items, key) => {
+    if (!replacedCategories.has(key)) {
+      merged.push(...items);
+      replacedCategories.add(key);
+    }
+  });
+
+  qualityStandards.value = merged;
+}
+
+/**
+ * 重置为系统默认质量标准库（清除用户上传的自定义标准）
+ */
+export function resetQualityStandardsToDefault(): void {
+  customQualityStandards.value = [];
+  customStandardsFileName.value = '';
+  qualityStandards.value = [...defaultQualityStandards.value];
+}
 
 // 4. 员工列表数据
 export const employees = ref<EmployeeRow[]>([]);

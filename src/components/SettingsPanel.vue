@@ -12,7 +12,7 @@ import { Settings, ShieldAlert, Eye, EyeOff, Save, Check, ChevronDown, ChevronUp
 
 // 控制配置面板的展开与收起状态
 // 默认展开以直观呈现 Google Gemini 及多模型配置信息，满足“默认展示 Gemini”要求
-const isCollapsed = ref(false);
+const isCollapsed = ref(true);
 
 // 控制 API Key 显隐明文状态
 const showKey = ref(false);
@@ -43,17 +43,17 @@ const providerList = computed(() => {
 
 // 初始化模型下拉框选中项
 const initialSelect = () => {
-  const currentModel = geminiConfig.model || currentPreset.value.defaultModel || 'gemini-2.5-flash';
+  const currentModel = geminiConfig.model || currentPreset.value.defaultModel || "gemini-2.5-flash";
   if (currentPreset.value.presetModels.includes(currentModel)) {
     return currentModel;
   }
   if (availableModels.value.includes(currentModel)) {
     return currentModel;
   }
-  if (geminiConfig.provider === 'gemini') {
-    return 'gemini-2.5-flash';
+  if (geminiConfig.provider === "gemini") {
+    return "gemini-2.5-flash";
   }
-  return currentModel || 'custom';
+  return currentModel || "custom";
 };
 const modelSelect = ref(initialSelect());
 

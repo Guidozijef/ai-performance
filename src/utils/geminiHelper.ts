@@ -4,7 +4,7 @@
  * 遵循 Google TypeScript 编码标准。
  */
 
-import type { CellMapping, PerformanceTask, QualityStandardItem } from "./excelHelper";
+import { cleanLeadingIndex, type CellMapping, type PerformanceTask, type QualityStandardItem } from "./excelHelper";
 import type { LLMProvider } from "../store";
 
 /**
@@ -522,7 +522,24 @@ ${standardsListStr}
 `;
   }
 
-  // 3. 构建大模型提示词，要求严密、科学、可量化，坚决杜绝任何主观或模糊的文字描述
+  // 3. 规范化解析用户填写的本月工作安排：一行严格对应一个独立的指标项，提取所有有效行并结构化编号
+  const userWorkLines = (thisMonthWorkContent || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  let formattedWorkContentSection = "";
+  if (userWorkLines.length > 0) {
+    // 关键优化：先将用户输入每行前缀自带的冗余序号/符号剥离，避免大模型把原序号机械当成工作内容承载
+    const formattedLines = userWorkLines
+      .map((line, idx) => `[用户填写第 ${idx + 1} 行指标]: ${cleanLeadingIndex(line)}`)
+      .join("\n");
+    formattedWorkContentSection = `【员工本月工作内容与计划安排】（用户共明确输入了 ${userWorkLines.length} 行工作内容，每一行必须严格独立对应一个考核指标项，严禁合并）：\n${formattedLines}`;
+  } else {
+    formattedWorkContentSection = `【员工本月工作内容与计划安排】：\n无本月工作安排`;
+  }
+
+  // 4. 构建大模型提示词，要求严密、科学、可量化，坚决杜绝任何主观或模糊的文字描述
   const prompt = `
 你是一个资深的企业人力资源（HR）绩效考评专家。
 请根据员工的基本信息、上个月填写的绩效内容、这个月的一些工作内容/工作安排、以及企业提供的《绩效质量标准库》，为该员工自动生成“${year}年${month}月的工作绩效计划表（即 Excel 模板中红色的任务部分）”。
@@ -534,22 +551,39 @@ ${standardsListStr}
 【员工上个月绩效内容回顾】：
 ${lastMonthPerformance || "无上月绩效数据"}
 
-【员工本月工作内容与计划安排】：
-${thisMonthWorkContent || "无本月工作安排"}
+${formattedWorkContentSection}
 ${standardsPromptSection}
 【绩效计划制定规则】：
-1. 必须生成【至少 4 个】常规工作任务项目（通常为 4 个以上），以完整科学地考核该员工的工作。即使本月输入的工作安排内容较少，你也要根据其岗位和项目对其进行合理拆解、细化出至少 4 项，绝对不能少于 4 项！
+1. 【核心刚性约束：用户填写的一行就是一个指标项，绝对不允许把填写的指标进行合并，指标项自动增加条数】：
+   - 【严格 1:1 独立映射】：用户在【员工本月工作内容与计划安排】中填写的每一行有效工作（如上述 [用户填写第 1 行指标]、[第 2 行指标]...），都必须【严格 1:1 独立对应】生成为 tasks 列表中的一个独立指标项任务！
+   - 【绝对严禁合并归纳】：绝对不允许把用户填写的两条或多条不同行工作内容合并、合并归纳或折叠到同一个任务项中！每行输入的具体内容必须完整承载到对应任务的 description（解释说明）中。
+   - 【条数随输入自动扩充】：
+     * 用户填写了多少行，就必须至少对应生成多少个独立的指标项任务（例如用户填写了 5 行就必须生成至少 5 项；用户填写了 6 行就必须对应生成 6 项；用户填写了 7 行就必须对应生成 7 项）；
+     * 绝不能为了凑成 4 项而将多行内容压缩归并为 4 项，指标项条数必须随用户输入的行数自动增加！
+   - 【条数下限与智能拓展规则】：
+     * 若用户填写的有效行数 >= 4 行：必须完整保留并一一对应生成这 N 个独立任务项（可根据实际合理扩充临时任务，但绝不能少于用户填写的行数），严禁合并；
+     * 若用户填写的有效行数 < 4 行（例如只填写了 1 行、2 行或 3 行）：用户填写的每一行依然必须独立作为一个任务项（严禁互相合并），同时你必须结合员工岗位（${position}）、项目技术背景还可以根据上期绩效工作内容对其进行合理拆解、细化出新的任务项，确保最终常规考核任务总数【至少达到 4 项】！
 2. 任务行的指标分配与权重分配约束（常规考核任务总权重必须刚好等于 100%，即小数 1.0）：
-   - 【特殊规则：市场侧临时新增开发任务/扣分项】：
-     * 若包含【市场侧临时新增开发任务】（或临时新增性质任务），该项【不算入权重】（不占用 100% 权重份额），其权重字段（weight）必须直接返回字符串 "扣分项"！
-     * 其余所有正常考核任务的权重之和必须由你精确平摊凑满 100%（即小数 1.0）。
+   - 【开发类岗位必须强制自动新增一行市场侧需求（绝对刚性，必须 100% 执行）】：
+     * 【判断逻辑】：只要被考核人员工岗位（${position}）属于开发/研发类岗位（如岗位名称包含“开发”、“研发”、“前端”、“后端”、“gis”、“全栈”、“技术”、“架构”等）；
+     * 【执行要求】：无论用户在【员工本月工作内容与计划安排】中填写了多少条工作、也无论用户是否写了市场侧需求，你都必须在生成的 tasks 列表末尾【强制自动新增一行独立的“市场侧临时新增开发任务”】！
+     * 【权重与属性约束】：
+       - type: "CPI"
+       - level: "常规执行任务"
+       - weight: 直接返回字符串 "扣分项"（极其重要：该项【不占用 100% 权重份额】，不计入常规任务的 100% 平摊，其余正常考核任务的权重之和必须凑满 100%！）
+       - category: "市场侧临时新增开发任务"
+       - description: "市场侧临时新增开发任务"
+       - 质量目标与质量标准必须 100% 完整继承标准库中【市场侧临时新增开发任务】的全部 4 条规范与 4 条扣分细则！
+     * 【严禁遗漏】：绝不能因为常规任务已达到 4 项或更多项而忽略该项，该项必须始终作为开发岗位的专属扣分考核项存在！
+   - 【其余正常考核任务】：其余所有正常考核任务的权重之和必须由你精确平摊凑满 100%（即小数 1.0）。
    - 【等级与类型严格绑定】：指标等级包含“核心战略任务”、“重要关键任务”、“常规执行任务”或“辅助零散任务”。
      * 如果指标等级为常规任务（即等级为“常规执行任务”或“辅助零散任务”），那么其对应的指标类型（type）必须是“CPI”。
      * 如果指标等级为核心或重要任务（即等级为“核心战略任务”或“重要关键任务”），其对应的指标类型（type）必须是“KPI”。
    - 【指标权重约束】：除“扣分项”外，每个常规任务分配的权重必须是 5% 的倍数（如以 0.3, 0.25, 0.2, 0.15, 0.1, 0.05 等小数形式表示）。
    - 【重要限制：每一项常规指标权重最大绝对不能超过 30%（即 weight <= 0.30）】。
-   - 【重要限制：“重要关键任务”的分配比例（权重）最低不能低于 20%（即 weight >= 0.20，且最大不超过 0.30）】。
-   - 所有常规任务的权重之和必须由你平摊并计算，确保生成的 JSON 中 tasks 列表中所有常规考核任务的 weight 字段相加之和【精准等于 1.0】。如果不够 100%，你必须增加更多符合限制的项目以达到 100%。
+   - 【重要核心限制：常规任务或辅助类型的任务（即等级为“常规执行任务”或“辅助零散任务”，类型为“CPI”）的每一项分值比例（权重）最高绝对不能超过 20%（即 weight <= 0.20，可选 0.20, 0.15, 0.10, 0.05，严禁超过 20%）】。
+   - 【重要限制：“重要关键任务”（类型为 KPI）的分配比例（权重）最低不能低于 20%（即 weight >= 0.20，且最大不超过 0.30）】。
+   - 【多条目权重自适应平摊分配】：无论最终生成多少项常规任务（4项、5项、6项或更多），所有常规任务的权重之和必须平摊计算并确保相加【精准等于 1.0】。当条数较多时，自动合理降低单项权重并均匀平摊（例如 5 项常规任务可设为 20%、20%、20%、20%、20% 或 25%、20%、20%、20%、15% 等；6 项常规任务可设为 20%、20%、15%、15%、15%、15% 等）。
 3. 【核心极重要规则：质量目标与质量标准必须绝对客观可量化，严禁任何主观描述，且必须分条列出序号】：
    - 质量目标（quality_target）和质量标准（quality_standard）的内容必须采用分条列出序号格式（如：'1. [具体项1]\n2. [具体项2]\n3. [具体项3]\n4. [具体项4]'），不得写成一整段话，每条都必须有精确的量化边界或对应的违规扣分触发条件。
    - 【严禁使用主观描述及模糊形容词】。禁止出现任何诸如：“积极主动”、“认真细致”、“配合度高”、“高效率”、“及时完成”、“保证系统稳定”、“正常运行”、“无重大故障”、“工作量饱满”、“沟通良好”等字眼。
@@ -569,7 +603,7 @@ ${standardsPromptSection}
    - level: 指标等级，可从 "核心战略任务"、"重要关键任务"、"常规执行任务"、"辅助零散任务" 中选择。
    - weight: 权重数值（小数形式如 0.3，或对于市场侧临时新增开发任务填字符串 "扣分项"）。
    - category: 所属板块，例如 "系统开发"、"系统维护"、"系统优化" 等。
-   - description: 解释说明，即任务的具体背景或重要工作内容（如：无人机V2.1.8版本迭代开发）。
+   - description: 解释说明，即任务的具体背景或重要工作内容（必须直接对应承载用户填写的对应行工作内容，严禁把多行拼凑合并在一个 description 中。★特别注意：Excel 表格首列已有独立序号列，description 任务内容中绝对不要带有任何前缀数字及标点序号，如严禁输出 "1."、"2、"、"(1)"、"①" 等，只保留纯粹的工作描述文本）。
    - time_target: 时间目标，如 "${year}年${month}月${lastDay - 1}日"。
    - count_target: 数量目标，如果没有则填写 "/"。
    - quality_target: 质量目标（务必使用分条序号格式，客观可量化，禁止主观判断）。
@@ -609,10 +643,49 @@ JSON 结构样例：
 
     let tasks: PerformanceTask[] = parsedData.tasks || [];
 
+    // 0. 后置防御清洗：确保 AI 输出的每项任务 description 与 category 均被彻底剥离任何前缀序号或标点
+    tasks.forEach((t) => {
+      if (t.description) {
+        t.description = cleanLeadingIndex(t.description);
+      }
+      if (t.category) {
+        t.category = cleanLeadingIndex(t.category);
+      }
+    });
+
     // 1. 识别“扣分项”任务（如市场侧临时新增开发任务）
     const isDeductionTask = (t: PerformanceTask) => {
       return t.weight === "扣分项" || String(t.weight).includes("扣分") || t.category === "市场侧临时新增开发任务" || (t.description && t.description.includes("市场侧临时新增"));
     };
+
+    // 1.1 开发岗位自动保底追加“市场侧临时新增开发任务”（双重保障机制：确保无论用户输入多少条，开发岗位均必定包含该扣分项）
+    const isDevPosition = /开发|研发|前端|后端|工程师|技术|架构|全栈|算法|程序员|软件|dev/i.test(position || "");
+    const hasMarketTask = tasks.some((t) => t.category === "市场侧临时新增开发任务" || (t.description && t.description.includes("市场侧")) || t.weight === "扣分项");
+
+    if (isDevPosition && !hasMarketTask) {
+      // 优先从已加载的标准库中查找【市场侧临时新增开发任务】
+      const matchedStd = standards.find((s) => s.categoryType.includes("市场侧") || s.categoryType.includes("临时新增"));
+
+      const defaultMarketTarget = matchedStd ? matchedStd.qualityTarget : "1.严格依照产品原型需求完成功能开发；\n2.Bug处理修复及时；\n3.已开发功能上线后不影响系统原有功能正常运行；\n4.满意度达到100%";
+
+      const defaultMarketStandard = matchedStd ? matchedStd.qualityStandard : "1.未按产品原型要求完成功能开发不得分，每遗漏一个功能扣5分，累计2个及以上不得分\n2.Bug未按时限修复（P0-P3等级定义及修复时效详见《客户/业务部门投诉衡量标准》)\n3.已开发功能因开发质量问题，造成已有功能异常、阻碍交付：扣10分/次\n4.投诉扣分标准详见《客户/业务部门投诉衡量标准》";
+
+      const marketTask: PerformanceTask = {
+        type: "CPI",
+        level: "常规执行任务",
+        weight: "扣分项",
+        category: "市场侧临时新增开发任务",
+        description: "市场侧临时新增开发任务",
+        time_target: `${year}年${month}月${lastDay}日`,
+        count_target: "/",
+        quality_target: defaultMarketTarget,
+        time_standard: "/",
+        count_standard: "/",
+        quality_standard: defaultMarketStandard,
+      };
+
+      tasks.push(marketTask);
+    }
 
     // 2. 规范化指标等级与指标类型（常规/辅助任务对应 CPI，重要/核心对应 KPI）
     tasks.forEach((t) => {
@@ -639,11 +712,17 @@ JSON 结构样例：
       }
     });
 
-    // 4. 约束常规任务的权重边界：最大不超过 30% (0.30)；重要关键任务最低不能低于 20% (0.20)
+    // 4. 约束常规任务的权重边界：
+    //    - 重要关键任务 (KPI)：最低不低于 20% (0.20)，最大不超过 30% (0.30)；
+    //    - 常规执行任务/辅助零散任务 (CPI)：最高绝对不能超过 20% (0.20)；
+    //    - 其余各项常规考核指标权重最大均不能超过 30% (0.30)。
     tasks.forEach((t) => {
       if (typeof t.weight === "number") {
         if (t.level === "重要关键任务") {
           if (t.weight < 0.2) t.weight = 0.2;
+        }
+        if (t.level === "常规执行任务" || t.level === "辅助零散任务" || t.type === "CPI") {
+          if (t.weight > 0.2) t.weight = 0.2;
         }
         if (t.weight > 0.3) {
           t.weight = 0.3;
@@ -682,16 +761,18 @@ JSON 结构样例：
       }
 
       if (sum < 1.0) {
-        // 总权重不足：优先在尚未达到 30% 上限的常规项中增加权重
+        // 总权重不足：优先在尚未达到对应类型上限的常规项中增加权重
+        // 重要/核心任务 (KPI) 上限为 30% (0.30)；常规/辅助任务 (CPI) 上限严格为 20% (0.20)
         let increased = false;
         for (let t of normalTasks) {
-          if (typeof t.weight === "number" && t.weight + 0.05 <= 0.3001) {
+          const maxLimit = t.level === "常规执行任务" || t.level === "辅助零散任务" || t.type === "CPI" ? 0.2 : 0.3;
+          if (typeof t.weight === "number" && t.weight + 0.05 <= maxLimit + 0.0001) {
             t.weight = Math.round((t.weight + 0.05) * 100) / 100;
             increased = true;
             break;
           }
         }
-        // 若全部常规项都已达到 30% 仍不足 100%，则追加一项常规任务
+        // 若全部常规项都已达到对应上限仍不足 100%，则追加一项常规任务 (CPI，初始权重 10% <= 20%)
         if (!increased) {
           const newTask: PerformanceTask = {
             type: "CPI",
@@ -737,6 +818,13 @@ JSON 结构样例：
       }
       iterations++;
     }
+
+    // 最终清洗兜底：确保返回前端界面展示及导出前的所有 tasks 的 description 绝对纯净
+    tasks.forEach((t) => {
+      if (t.description) {
+        t.description = cleanLeadingIndex(t.description);
+      }
+    });
 
     return {
       name: parsedData.name || name,

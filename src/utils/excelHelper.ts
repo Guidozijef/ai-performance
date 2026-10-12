@@ -617,15 +617,15 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
   }
 
   // 建立列名到样式索引的映射字典：
-  // 序号(A)、指标类型(B)、指标等级(C)、权重(D)、所属板块(E)、时间目标(G)、数量目标(H)、时间标准(J)、数量标准(K) 采用居中样式
-  // 解释说明(F)、质量目标(I)、质量标准(L) 严格采用居左样式
+  // 序号(A)、指标类型(B)、指标等级(C)、权重(D)、所属板块(E)、解释说明(F)、时间目标(G)、数量目标(H)、时间标准(J)、数量标准(K) 严格采用居中样式
+  // 质量目标(I)、质量标准(L) 严格采用居左样式
   const taskColStyles: Record<string, number> = {
     A: centerStyleId,
     B: centerStyleId,
     C: centerStyleId,
     D: centerStyleId,
     E: centerStyleId,
-    F: leftStyleId,
+    F: centerStyleId, // 解释说明，严格居中对齐
     G: centerStyleId,
     H: centerStyleId,
     I: leftStyleId, // 质量目标，严格居左对齐
@@ -780,16 +780,18 @@ export async function writePerformanceToTemplate(templateBuffer: ArrayBuffer, na
       sheetXml = patchCellStrWithStyle(sheetXml, `D${rn}`, r.index, taskColStyles["D"]);
     }
 
-    // 所属板块（E列，居中）
+    // 所属板块（E列，居中，安全过滤前缀序号）
     {
-      const r = upsertSharedString(ssXml, task.category || "/");
+      const cleanCat = cleanLeadingIndex(task.category || "/");
+      const r = upsertSharedString(ssXml, cleanCat || "/");
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `E${rn}`, r.index, taskColStyles["E"]);
     }
 
-    // 解释说明（F列，居左）
+    // 解释说明（F列，居中对齐，自动剔除前缀冗余序号）
     {
-      const r = upsertSharedString(ssXml, task.description || "");
+      const cleanDesc = cleanLeadingIndex(task.description || "");
+      const r = upsertSharedString(ssXml, cleanDesc);
       ssXml = r.newSsXml;
       sheetXml = patchCellStrWithStyle(sheetXml, `F${rn}`, r.index, taskColStyles["F"]);
     }
@@ -961,24 +963,83 @@ export async function readPerformanceFromExcel(file: File): Promise<{
 }
 
 /**
+ * 清除文本前缀中多余的序号或列表标点（如 "1. "、"1、"、"(1) "、"① "、"一、"、"- 1. "、"【1】"、"1 " 等）
+ * 防止 Excel 单元格在已有 A 列独立序号列的情况下出现内容二次重复编号。
+ * 遵循严格白名单与字符集匹配，避免误删如 "V2.1.8"、"100%"、"2024-10-15"、"P0-P3" 等有效业务文本。
+ *
+ * @param text 待清洗的原始文本
+ * @returns 清除前缀序号后的纯净文本内容
+ */
+export function cleanLeadingIndex(text: string): string {
+  if (!text) return "";
+  let cleaned = text.trim();
+  const leadingIndexRegex = /^([0-9]{1,2}[、.．:：\)）\]】]|[\(（\[【][0-9]{1,2}[\)）\]】]|[①-⑩]|[一二三四五六七八九十]+[、.．]|[-*•·\u2022]|^[0-9]{1,2}\s+)\s*/;
+  // 最多清洗 2 次，处理例如 "- 1. xxx" 等复合前缀
+  for (let i = 0; i < 2; i++) {
+    const next = cleaned.replace(leadingIndexRegex, "").trim();
+    if (next === cleaned) break;
+    cleaned = next;
+  }
+  return cleaned;
+}
+
+/**
  * 绩效质量标准库条目定义
  */
 export interface QualityStandardItem {
-  /** 任务/业务类型，如 "功能开发", "测试线上问题处理" */
+  /** 任务/业务类型，如 "功能开发", "系统开发", "测试线上问题处理" */
   categoryType: string;
   /** 对应的质量目标（分条规范） */
   qualityTarget: string;
   /** 对应的质量标准（违规扣分细则） */
   qualityStandard: string;
+  /** 是否为用户自定义上传/覆盖的规则条目 */
+  isCustom?: boolean;
+}
+
+/**
+ * 从单元格中安全提取格式化字符串（兼容纯文本、富文本 RichText、数值及公式运算结果）
+ *
+ * @param cell ExcelJS 单元格对象
+ * @returns 规范化后的文本字符串
+ */
+function extractCellText(cell: ExcelJS.Cell): string {
+  if (cell.value === null || cell.value === undefined) {
+    return "";
+  }
+  if (typeof cell.value === "object") {
+    // 1. 处理富文本 (RichText) 数组
+    if ("richText" in cell.value && Array.isArray((cell.value as any).richText)) {
+      return (cell.value as any).richText
+        .map((t: { text?: string }) => t.text || "")
+        .join("")
+        .trim();
+    }
+    // 2. 处理包含公式计算结果 (result) 的单元格
+    if ("result" in cell.value && (cell.value as any).result !== undefined) {
+      return String((cell.value as any).result).trim();
+    }
+    // 3. 处理包含纯文本属性 (text) 的单元格
+    if ("text" in cell.value && typeof (cell.value as any).text === "string") {
+      return (cell.value as any).text.trim();
+    }
+  }
+  return String(cell.value).trim();
 }
 
 /**
  * 解析绩效质量标准库 Excel 文件
  *
+ * 支持智能识别表头列索引，兼容 3 列及 4 列标准库模板（解决序号列位移导致扣分细则被丢弃的历史缺陷）。
+ *
  * @param buffer 质量标准库 Excel 二进制 ArrayBuffer
+ * @param isCustom 是否为用户自定义上传的标准库
  * @returns Promise<QualityStandardItem[]> 解析出的标准条目列表
  */
-export async function parseQualityStandards(buffer: ArrayBuffer): Promise<QualityStandardItem[]> {
+export async function parseQualityStandards(
+  buffer: ArrayBuffer,
+  isCustom = false
+): Promise<QualityStandardItem[]> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer.slice(0));
 
@@ -987,21 +1048,70 @@ export async function parseQualityStandards(buffer: ArrayBuffer): Promise<Qualit
     return [];
   }
 
+  // 1. 扫描前 5 行，智能动态定位表头所在行及对应列索引
+  let headerRow = 1;
+  let colCategory = -1;
+  let colTarget = -1;
+  let colStandard = -1;
+
+  const maxScanRows = Math.min(worksheet.rowCount, 5);
+  for (let r = 1; r <= maxScanRows; r++) {
+    const row = worksheet.getRow(r);
+    row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
+      const text = extractCellText(cell);
+      // 匹配业务类型列
+      if (/类型|类别|板块|模块|任务/.test(text) && colCategory === -1) {
+        colCategory = colNumber;
+      }
+      // 匹配质量目标列
+      if (/目标/.test(text) && colTarget === -1) {
+        colTarget = colNumber;
+      }
+      // 匹配质量标准/衡量细则/扣分规则列
+      if (/标准|衡量|扣分/.test(text) && colStandard === -1) {
+        colStandard = colNumber;
+      }
+    });
+
+    if (colCategory !== -1 && (colTarget !== -1 || colStandard !== -1)) {
+      headerRow = r;
+      break;
+    }
+  }
+
+  // 2. 若未通过关键词匹配到表头（例如无表头文件），采用启发式列位置兜底
+  if (colCategory === -1 || colTarget === -1 || colStandard === -1) {
+    const actualColCount = worksheet.columnCount || worksheet.actualColumnCount || 4;
+    if (actualColCount >= 4) {
+      // 标准 4 列格式：[1:序号, 2:类型, 3:质量目标, 4:质量标准]
+      colCategory = colCategory === -1 ? 2 : colCategory;
+      colTarget = colTarget === -1 ? 3 : colTarget;
+      colStandard = colStandard === -1 ? 4 : colStandard;
+    } else {
+      // 简版 3 列格式：[1:类型, 2:质量目标, 3:质量标准]
+      colCategory = colCategory === -1 ? 1 : colCategory;
+      colTarget = colTarget === -1 ? 2 : colTarget;
+      colStandard = colStandard === -1 ? 3 : colStandard;
+    }
+  }
+
   const standards: QualityStandardItem[] = [];
   const rowCount = worksheet.rowCount;
 
-  // 从第 2 行开始读取（第 1 行为表头）
-  for (let r = 2; r <= rowCount; r++) {
+  // 3. 从表头下一行开始逐行解析标准规范
+  for (let r = headerRow + 1; r <= rowCount; r++) {
     const row = worksheet.getRow(r);
-    const categoryType = String(row.getCell(1).value || "").trim();
-    const qualityTarget = String(row.getCell(2).value || "").trim();
-    const qualityStandard = String(row.getCell(3).value || "").trim();
+    const categoryType = extractCellText(row.getCell(colCategory));
+    const qualityTarget = extractCellText(row.getCell(colTarget));
+    const qualityStandard = extractCellText(row.getCell(colStandard));
 
+    // 过滤纯空行，只要包含分类且（具备目标或标准其一）即为有效标准项
     if (categoryType && (qualityTarget || qualityStandard)) {
       standards.push({
         categoryType,
         qualityTarget,
         qualityStandard,
+        isCustom,
       });
     }
   }
